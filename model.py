@@ -11,49 +11,54 @@ def fetch_data(symbol):
         df = yf.download(ticker, period=f"{config.HISTORY_LIMIT}d", interval=config.TIMEFRAME)
         if df.empty:
             raise ValueError(f"Данные для {ticker} пусты")
+        if len(df) < 50:  # Проверяем минимальное количество строк для ma_long
+            raise ValueError(f"Недостаточно данных для {ticker}: {len(df)} строк, требуется минимум 50")
         df.reset_index(inplace=True)
         df.rename(columns={'Date': 'timestamp', 'Open': 'open', 'High': 'high',
                           'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-        print(f"[DEBUG] Загружены данные для {symbol} ({ticker}): {df.shape}")
+        df = df.drop_duplicates().sort_values('timestamp')
+        print(f"[DEBUG] Загружены данные для {symbol} ({ticker}): shape={df.shape}, columns={df.columns.tolist()}")
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
     except Exception as e:
         raise Exception(f"Ошибка загрузки данных для {symbol}: {e}")
 
 def prepare_features(df, lookahead_days=4):
     try:
-        # Создаём копию DataFrame, чтобы избежать изменений оригинала
         df = df.copy()
-        
-        # Проверяем, достаточно ли данных
-        if len(df) < 50:  # Для ma_long требуется минимум 50 строк
-            raise ValueError(f"Недостаточно данных: {len(df)} строк, требуется минимум 50")
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        if not all(col in df.columns for col in required_cols):
+            raise ValueError(f"Отсутствуют необходимые столбцы: {required_cols}")
+
+        df = df.reset_index(drop=True)
+        print(f"[DEBUG] Исходный DataFrame: shape={df.shape}")
 
         steps = lookahead_days
-        # Создаём target с использованием shift
         df['target'] = df['close'].shift(-steps)
-        # Удаляем строки с NaN в target заранее
-        df = df.dropna(subset=['target'])
+        
+        if df['target'].isna().all():
+            raise ValueError(f"Столбец 'target' содержит только NaN, возможно, недостаточно данных для сдвига на {steps} дней")
 
-        # Вычисляем direction
+        df = df.dropna(subset=['target', 'close'])
+        if df.empty:
+            raise ValueError("DataFrame пуст после удаления NaN в 'target' и 'close'")
+
         df['direction'] = (df['target'] > df['close']).astype(int)
 
-        # Вычисляем признаки
-        df['ma_short'] = df['close'].rolling(10).mean()
-        df['ma_long'] = df['close'].rolling(50).mean()
+        df['ma_short'] = df['close'].rolling(window=10, min_periods=10).mean()
+        df['ma_long'] = df['close'].rolling(window=50, min_periods=50).mean()
         df['volatility'] = df['high'] - df['low']
         df['momentum'] = df['close'].diff(5)
 
-        # Удаляем все строки с NaN после вычисления признаков
         df = df.dropna()
         if df.empty:
-            raise ValueError("После обработки данных DataFrame пуст")
+            raise ValueError("DataFrame пуст после удаления NaN для признаков")
 
         features = ['open', 'high', 'low', 'close', 'volume', 'ma_short', 'ma_long', 'volatility', 'momentum']
         X = df[features]
         y = df['direction']
 
-        print(f"[DEBUG] Подготовлены признаки: X.shape={X.shape}, y.shape={y.shape}")
+        print(f"[DEBUG] Признаки подготовлены: X.shape={X.shape}, y.shape={y.shape}")
         return X, y
     except Exception as e:
         raise Exception(f"Ошибка подготовки признаков: {e}")
