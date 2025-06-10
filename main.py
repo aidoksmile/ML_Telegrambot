@@ -18,10 +18,12 @@ def send_telegram_message(text):
             "parse_mode": "Markdown"
         }
         response = requests.post(url, json=payload)
-        response.raise_for_status()  # Проверка на ошибки HTTP
-        print("[INFO] Сообщение отправлено в Telegram")
+        response.raise_for_status()
+        print(f"[INFO] Сообщение отправлено в Telegram: {text[:50]}...")
+        return response
     except Exception as e:
-        print(f"[ERROR] Не удалось отправить сообщение в Telegram: {e}")
+        print(f"[ERROR] Ошибка отправки в Telegram: {e}")
+        return None
 
 def run_backtest(df, model_obj):
     try:
@@ -34,6 +36,7 @@ def run_backtest(df, model_obj):
         bt._broker._model = model_obj
         bt._broker._features = bt_df[['open', 'high', 'low', 'close', 'volume', 'ma_short', 'ma_long', 'volatility', 'momentum']]
         result = bt.run()
+        print(f"[INFO] Бэктест завершен, ROI: {result['Return [%]']:.2f}%")
         return result
     except Exception as e:
         print(f"[ERROR] Ошибка в бэктестинге: {e}")
@@ -48,15 +51,17 @@ def generate_signal(df, model_obj):
         volatility = last_row['volatility']
         stop_loss = entry_price - 2 * volatility
         take_profit = entry_price + 4 * volatility
+        print(f"[INFO] Сигнал сгенерирован: {direction}, Entry: {entry_price:.2f}")
         return direction, entry_price, stop_loss, take_profit
     except Exception as e:
         print(f"[ERROR] Ошибка при генерации сигнала: {e}")
         return None, None, None, None
 
 def process_symbol(symbol):
-    print(f"[{datetime.now()}] Обработка пары: {symbol}")
+    print(f"[{datetime.now()}] Начало обработки пары: {symbol}")
     try:
         df = model.fetch_data(symbol)
+        print(f"[DEBUG] Данные для {symbol} загружены, размер: {df.shape}")
         if df.empty:
             error_msg = f"❌ Данные для {symbol} пусты"
             print(error_msg)
@@ -70,6 +75,7 @@ def process_symbol(symbol):
 
     try:
         X, y = model.prepare_features(df, config.LOOKAHEAD_DAYS)
+        print(f"[DEBUG] Features для {symbol}: X.shape={X.shape}, y.shape={y.shape}")
         if X.empty or y.empty:
             error_msg = f"❌ Недостаточно данных для обучения модели {symbol}"
             print(error_msg)
@@ -83,13 +89,13 @@ def process_symbol(symbol):
 
     try:
         model_obj = model.train_model(X, y)
+        print(f"[INFO] Модель для {symbol} обучена")
     except Exception as e:
         error_msg = f"❌ Не удалось обучить модель для {symbol}: {e}"
         print(error_msg)
         send_telegram_message(error_msg)
         return
 
-    # Генерация сигнала
     direction, entry, sl, tp = generate_signal(df, model_obj)
     if direction is None:
         error_msg = f"❌ Не удалось сгенерировать сигнал для {symbol}"
@@ -97,7 +103,6 @@ def process_symbol(symbol):
         send_telegram_message(error_msg)
         return
 
-    # Бэктестинг
     stats = run_backtest(df, model_obj)
     if stats is None:
         error_msg = f"❌ Не удалось выполнить бэктест для {symbol}"
@@ -108,7 +113,6 @@ def process_symbol(symbol):
     roi = stats["Return [%]"]
     win_rate = stats["Win Rate [%]"]
 
-    # Отправка сигнала в Telegram
     signal_text = f"""
 🔔 **Сигнал для {symbol}**
 🕒 Время: {datetime.now()}
@@ -123,6 +127,7 @@ def process_symbol(symbol):
     print(f"✅ Сигнал отправлен для {symbol}")
 
 def main():
+    print(f"[CONFIG] ASSETS: {config.ASSETS}, UPDATE_INTERVAL: {config.UPDATE_INTERVAL}")
     print("[START] Запуск бота...")
     send_telegram_message("🟢 Бот запущен и готов к работе!")
     print("[Бот запущен]")
@@ -134,7 +139,7 @@ def main():
             print(f"[Сон...] Следующее обновление через {config.UPDATE_INTERVAL} секунд")
             time.sleep(config.UPDATE_INTERVAL)
         except Exception as e:
-            error_msg = f"❌ Ошибка в основном цикле: {e}"
+            error_msg = f"⚠️ Ошибка в основном цикле: {e}"
             print(error_msg)
             send_telegram_message(error_msg)
             time.sleep(60)
