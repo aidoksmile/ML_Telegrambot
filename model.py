@@ -9,28 +9,26 @@ import time
 def fetch_data(symbol):
     try:
         ticker = config.TICKER_MAP[symbol]
-        timeframe = config.TIMEFRAME.get(symbol, "daily")  # Получаем интервал для символа
+        timeframe = config.TIMEFRAME.get(symbol, "daily")
         if timeframe == "15min":
             function = "FX_INTRADAY"
             interval = "15min"
-            url = f"https://www.alphavantage.co/query?function={function}&from_symbol={ticker[:3]}&to_symbol={ticker[3:]}&interval={interval}&outputsize=full&apikey={config.ALPHA_VANTAGE_API_KEY}"
+            url = f"https://www.alphavantage.co/query?function={function}&from_symbol={ticker[:3]}&to_symbol={ticker[3:]}&outputsize=full&apikey={config.ALPHA_VANTAGE_API_KEY}"
         else:
-            function = "FX_DAILY" if symbol != "XAU/USD" else "COMMODITY_PRICES"
-            url = f"https://www.alphavantage.co/query?function={function}&symbol={ticker if symbol == 'XAU/USD' else ticker[:3] + '/' + ticker[3:]}&interval=daily&apikey={config.ALPHA_VANTAGE_API_KEY}"
+            function = "FX_DAILY" if symbol != "XAU/USD" else "FX_DAILY"  # Используем FX_DAILY для золота
+            url = f"https://www.alphavantage.co/query?function={function}&from_symbol={ticker[:3]}&to_symbol={ticker[3:]}&outputsize=full&apikey={config.ALPHA_VANTAGE_API_KEY}"
 
-        for attempt in range(3):  # Пробуем 3 раза
+        for attempt in range(3):
             try:
                 response = requests.get(url)
                 response.raise_for_status()
                 data = response.json()
 
-                # Проверка на наличие данных
-                time_series_key = "Time Series FX (15min)" if timeframe == "15min" else "Time Series FX (Daily)" if symbol != "XAU/USD" else "Time Series"
+                time_series_key = "Time Series FX (15min)" if timeframe == "15min" else "Time Series FX (Daily)"
                 if time_series_key not in data:
                     error = data.get("Note", "No data returned")
                     raise ValueError(f"Данные для {ticker} отсутствуют или некорректны: {error}")
 
-                # Извлечение данных
                 time_series = data[time_series_key]
                 df = pd.DataFrame.from_dict(time_series, orient="index")
                 df = df.reset_index().rename(columns={
@@ -42,15 +40,9 @@ def fetch_data(symbol):
                     "5. volume": "volume" if "5. volume" in df.columns else "volume"
                 })
 
-                # Для золота (XAU/USD)
                 if symbol == "XAU/USD":
-                    df = df.rename(columns={
-                        "price": "close",
-                        "change": "volume"  # Заглушка
-                    })
-                    df["open"] = df["high"] = df["low"] = df["close"]  # Заглушка
+                    df["volume"] = 0  # Заглушка, так как volume отсутствует
 
-                # Преобразование типов и сортировка
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
                 for col in ["open", "high", "low", "close"]:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
