@@ -13,7 +13,7 @@ TICKER_MAP = {
 
 # Интервалы: 'daily' для XAU/USD, '15min' для EUR/USD
 TIMEFRAME = {
-    "XAU/USD": "15min",
+    "XAU/USD": "daily",
     "EUR/USD": "15min"
 }
 LOOKAHEAD_DAYS = 1        # Уменьшено для тестирования
