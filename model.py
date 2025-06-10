@@ -11,15 +11,21 @@ def fetch_data(symbol):
         df = yf.download(ticker, period=f"{config.HISTORY_LIMIT}d", interval=config.TIMEFRAME)
         if df.empty:
             raise ValueError(f"Данные для {ticker} пусты")
-        if len(df) < 50:  # Проверяем минимальное количество строк для ma_long
+        if len(df) < 50:
             raise ValueError(f"Недостаточно данных для {ticker}: {len(df)} строк, требуется минимум 50")
         df.reset_index(inplace=True)
+        # Проверяем наличие столбца 'Close'
+        if 'Close' not in df.columns:
+            raise ValueError(f"Столбец 'Close' отсутствует в данных для {ticker}")
         df.rename(columns={'Date': 'timestamp', 'Open': 'open', 'High': 'high',
                           'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.drop_duplicates().sort_values('timestamp')
+        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        if not all(col in df.columns for col in required_cols):
+            raise ValueError(f"Отсутствуют необходимые столбцы: {required_cols}, получено: {df.columns.tolist()}")
         print(f"[DEBUG] Загружены данные для {symbol} ({ticker}): shape={df.shape}, columns={df.columns.tolist()}")
-        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        return df[required_cols]
     except Exception as e:
         raise Exception(f"Ошибка загрузки данных для {symbol}: {e}")
 
@@ -28,14 +34,16 @@ def prepare_features(df, lookahead_days=4):
         df = df.copy()
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         if not all(col in df.columns for col in required_cols):
-            raise ValueError(f"Отсутствуют необходимые столбцы: {required_cols}")
+            raise ValueError(f"Отсутствуют необходимые столбцы: {required_cols}, получено: {df.columns.tolist()}")
 
         df = df.reset_index(drop=True)
-        print(f"[DEBUG] Исходный DataFrame: shape={df.shape}")
+        print(f"[DEBUG] Исходный DataFrame: shape={df.shape}, columns={df.columns.tolist()}")
 
         steps = lookahead_days
+        if len(df) < steps + 50:  # Убедимся, что данных достаточно для сдвига и ma_long
+            raise ValueError(f"Недостаточно данных: {len(df)} строк, требуется минимум {steps + 50}")
+
         df['target'] = df['close'].shift(-steps)
-        
         if df['target'].isna().all():
             raise ValueError(f"Столбец 'target' содержит только NaN, возможно, недостаточно данных для сдвига на {steps} дней")
 
