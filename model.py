@@ -9,53 +9,71 @@ import time
 def fetch_data(symbol):
     try:
         ticker = config.TICKER_MAP[symbol]
-        timeframe = config.TIMEFRAME.get(symbol, "daily")
-        if timeframe == "15min":
-            function = "FX_INTRADAY"
-            interval = "15min"
-            url = f"https://www.alphavantage.co/query?function={function}&from_symbol={ticker[:3]}&to_symbol={ticker[3:]}&outputsize=full&apikey={config.ALPHA_VANTAGE_API_KEY}"
-        else:
-            function = "FX_DAILY" if symbol != "XAU/USD" else "FX_DAILY"  # Используем FX_DAILY для золота
-            url = f"https://www.alphavantage.co/query?function={function}&from_symbol={ticker[:3]}&to_symbol={ticker[3:]}&outputsize=full&apikey={config.ALPHA_VANTAGE_API_KEY}"
+        timeframe = config.TIMEFRAME.get(symbol, "MINUTE_15")
+        session_url = f"{config.BASE_URL}/api/v1/session"
+        prices_url = f"{config.BASE_URL}/api/v1/prices/{ticker}"
 
+        # Авторизация
+        headers = {
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "identifier": config.CAPITAL_EMAIL,
+            "password": config.CAPITAL_PASSWORD,
+            "encryptedPassword": False
+        }
         for attempt in range(3):
             try:
-                response = requests.get(url)
+                response = requests.post(session_url, headers=headers, json=payload)
+                response.raise_for_status()
+                session_data = response.json()
+                cst = response.headers.get("CST")
+                security_token = response.headers.get("X-SECURITY-TOKEN")
+                if not cst or not security_token:
+                    raise ValueError("Не удалось получить CST или X-SECURITY-TOKEN")
+                break
+            except Exception as e:
+                if attempt < 2:
+                    print(f"[WARNING] Попытка авторизации {attempt + 1} не удалась: {e}, повтор через 5 секунд")
+                    time.sleep(5)
+                else:
+                    raise ValueError(f"Не удалось авторизоваться после 3 попыток: {e}")
+
+        # Запрос исторических данных
+        headers = {
+            "CST": cst,
+            "X-SECURITY-TOKEN": security_token
+        }
+        params = {
+            "resolution": timeframe,
+            "maxReturn": config.HISTORY_LIMIT
+        }
+        for attempt in range(3):
+            try:
+                response = requests.get(prices_url, headers=headers, params=params)
                 response.raise_for_status()
                 data = response.json()
-
-                time_series_key = "Time Series FX (15min)" if timeframe == "15min" else "Time Series FX (Daily)"
-                if time_series_key not in data:
-                    error = data.get("Note", "No data returned")
-                    raise ValueError(f"Данные для {ticker} отсутствуют или некорректны: {error}")
-
-                time_series = data[time_series_key]
-                df = pd.DataFrame.from_dict(time_series, orient="index")
-                df = df.reset_index().rename(columns={
-                    "index": "timestamp",
-                    "1. open": "open",
-                    "2. high": "high",
-                    "3. low": "low",
-                    "4. close": "close",
-                    "5. volume": "volume" if "5. volume" in df.columns else "volume"
+                if "prices" not in data:
+                    raise ValueError(f"Данные для {ticker} отсутствуют: {data.get('error', 'No data')}")
+                df = pd.DataFrame(data["prices"])
+                df = df.rename(columns={
+                    "snapshotTimeUTC": "timestamp",
+                    "openPrice": "open",
+                    "highPrice": "high",
+                    "lowPrice": "low",
+                    "closePrice": "close",
+                    "volume": "volume"
                 })
-
-                if symbol == "XAU/USD":
-                    df["volume"] = 0  # Заглушка, так как volume отсутствует
-
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
                 for col in ["open", "high", "low", "close"]:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                    df[col] = pd.to_numeric(df[col].apply(lambda x: x.get("bid") if isinstance(x, dict) else x), errors="coerce")
                 df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce")
                 df = df.sort_values("timestamp").tail(config.HISTORY_LIMIT)
-
                 if df.empty or len(df) < 50:
-                    raise ValueError(f"Недостаточно данных для {ticker}: {len(df)} строк, требуется минимум 50")
-
+                    raise ValueError(f"Недостаточно данных для {ticker}: {len(df)} строк")
                 required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
                 if not all(col in df.columns for col in required_cols):
                     raise ValueError(f"Отсутствуют столбцы: {required_cols}, получено: {df.columns.tolist()}")
-
                 print(f"[DEBUG] Загружены данные для {symbol} ({ticker}): shape={df.shape}, columns={df.columns.tolist()}, timeframe={timeframe}")
                 return df[required_cols]
             except Exception as e:
