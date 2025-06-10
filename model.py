@@ -1,31 +1,78 @@
 import pandas as pd
-import yfinance as yf
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import accuracy_score
 import config
+import requests
+import time
 
 def fetch_data(symbol):
     try:
         ticker = config.TICKER_MAP[symbol]
-        df = yf.download(ticker, period=f"{config.HISTORY_LIMIT}d", interval=config.TIMEFRAME)
-        if df.empty:
-            raise ValueError(f"Данные для {ticker} пусты")
-        if len(df) < 50:
-            raise ValueError(f"Недостаточно данных для {ticker}: {len(df)} строк, требуется минимум 50")
-        df.reset_index(inplace=True)
-        # Проверяем наличие столбца 'Close'
-        if 'Close' not in df.columns:
-            raise ValueError(f"Столбец 'Close' отсутствует в данных для {ticker}")
-        df.rename(columns={'Date': 'timestamp', 'Open': 'open', 'High': 'high',
-                          'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.drop_duplicates().sort_values('timestamp')
-        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        if not all(col in df.columns for col in required_cols):
-            raise ValueError(f"Отсутствуют необходимые столбцы: {required_cols}, получено: {df.columns.tolist()}")
-        print(f"[DEBUG] Загружены данные для {symbol} ({ticker}): shape={df.shape}, columns={df.columns.tolist()}")
-        return df[required_cols]
+        timeframe = config.TIMEFRAME.get(symbol, "daily")  # Получаем интервал для символа
+        if timeframe == "15min":
+            function = "FX_INTRADAY"
+            interval = "15min"
+            url = f"https://www.alphavantage.co/query?function={function}&from_symbol={ticker[:3]}&to_symbol={ticker[3:]}&interval={interval}&outputsize=full&apikey={config.ALPHA_VANTAGE_API_KEY}"
+        else:
+            function = "FX_DAILY" if symbol != "XAU/USD" else "COMMODITY_PRICES"
+            url = f"https://www.alphavantage.co/query?function={function}&symbol={ticker if symbol == 'XAU/USD' else ticker[:3] + '/' + ticker[3:]}&interval=daily&apikey={config.ALPHA_VANTAGE_API_KEY}"
+
+        for attempt in range(3):  # Пробуем 3 раза
+            try:
+                response = requests.get(url)
+                response.raise_for_status()
+                data = response.json()
+
+                # Проверка на наличие данных
+                time_series_key = "Time Series FX (15min)" if timeframe == "15min" else "Time Series FX (Daily)" if symbol != "XAU/USD" else "Time Series"
+                if time_series_key not in data:
+                    error = data.get("Note", "No data returned")
+                    raise ValueError(f"Данные для {ticker} отсутствуют или некорректны: {error}")
+
+                # Извлечение данных
+                time_series = data[time_series_key]
+                df = pd.DataFrame.from_dict(time_series, orient="index")
+                df = df.reset_index().rename(columns={
+                    "index": "timestamp",
+                    "1. open": "open",
+                    "2. high": "high",
+                    "3. low": "low",
+                    "4. close": "close",
+                    "5. volume": "volume" if "5. volume" in df.columns else "volume"
+                })
+
+                # Для золота (XAU/USD)
+                if symbol == "XAU/USD":
+                    df = df.rename(columns={
+                        "price": "close",
+                        "change": "volume"  # Заглушка
+                    })
+                    df["open"] = df["high"] = df["low"] = df["close"]  # Заглушка
+
+                # Преобразование типов и сортировка
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                for col in ["open", "high", "low", "close"]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce")
+                df = df.sort_values("timestamp").tail(config.HISTORY_LIMIT)
+
+                if df.empty or len(df) < 50:
+                    raise ValueError(f"Недостаточно данных для {ticker}: {len(df)} строк, требуется минимум 50")
+
+                required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+                if not all(col in df.columns for col in required_cols):
+                    raise ValueError(f"Отсутствуют столбцы: {required_cols}, получено: {df.columns.tolist()}")
+
+                print(f"[DEBUG] Загружены данные для {symbol} ({ticker}): shape={df.shape}, columns={df.columns.tolist()}, timeframe={timeframe}")
+                return df[required_cols]
+            except Exception as e:
+                if attempt < 2:
+                    print(f"[WARNING] Попытка {attempt + 1} не удалась для {ticker}: {e}, повтор через 5 секунд")
+                    time.sleep(5)
+                else:
+                    raise
+        raise ValueError(f"Не удалось загрузить данные для {ticker} после 3 попыток")
     except Exception as e:
         raise Exception(f"Ошибка загрузки данных для {symbol}: {e}")
 
@@ -40,12 +87,12 @@ def prepare_features(df, lookahead_days=4):
         print(f"[DEBUG] Исходный DataFrame: shape={df.shape}, columns={df.columns.tolist()}")
 
         steps = lookahead_days
-        if len(df) < steps + 50:  # Убедимся, что данных достаточно для сдвига и ma_long
+        if len(df) < steps + 50:
             raise ValueError(f"Недостаточно данных: {len(df)} строк, требуется минимум {steps + 50}")
 
         df['target'] = df['close'].shift(-steps)
         if df['target'].isna().all():
-            raise ValueError(f"Столбец 'target' содержит только NaN, возможно, недостаточно данных для сдвига на {steps} дней")
+            raise ValueError(f"Столбец 'target' содержит только NaN, возможно, недостаточно данных для сдвига на {steps} шагов")
 
         df = df.dropna(subset=['target', 'close'])
         if df.empty:
