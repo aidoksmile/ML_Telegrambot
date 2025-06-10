@@ -54,7 +54,7 @@ def generate_signal(df, model_obj):
         print(f"[INFO] Сигнал сгенерирован: {direction}, Entry: {entry_price:.2f}")
         return direction, entry_price, stop_loss, take_profit
     except Exception as e:
-        print(f"[ERROR] Ошибка при генерации сигнала: {e}")
+        print(f"[ERROR] Ошибка при  генерации сигнала: {e}")
         return None, None, None, None
 
 def process_symbol(symbol):
@@ -130,12 +130,12 @@ def main():
     print(f"[CONFIG] ASSETS: {config.ASSETS}, UPDATE_INTERVAL: {config.UPDATE_INTERVAL}")
     print("[START] Запуск бота...")
     if send_telegram_message("🟢 Бот запущен и готов к работе!") is None:
-        print("[ERROR] Не удалось отправить стартовое сообщение в Telegram")
+        print("[ERROR] Не удалось отправить стартовое сообщение в Telegram, продолжаем выполнение...")
     print("[Бот запущен]")
 
     while True:
         try:
-            for symbol in config.ASSETS:  # Теперь итерируемся по списку
+            for symbol in config.ASSETS:
                 process_symbol(symbol)
             print(f"[Сон...] Следующее обновление через {config.UPDATE_INTERVAL} секунд")
             time.sleep(config.UPDATE_INTERVAL)
