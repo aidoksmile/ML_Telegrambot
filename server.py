@@ -4,9 +4,12 @@ import main
 import logging
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(), logging.FileHandler('bot.log')]
+)
 
-# Переменная для отслеживания состояния бота
 bot_running = False
 bot_thread = None
 
@@ -27,7 +30,7 @@ def start_bot():
             app.logger.error(f"Ошибка в основном цикле: {e}")
 
     bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True  # Демон, чтобы завершался при остановке сервера
+    bot_thread.daemon = True
     bot_thread.start()
     bot_running = True
     app.logger.info("Бот запущен в фоне")
@@ -35,7 +38,10 @@ def start_bot():
 
 @app.route("/status")
 def check_status():
-    return "🚀 Бот работает!" if bot_running else "⚠️ Бот не запущен!", 200
+    if bot_running and bot_thread.is_alive():
+        return "🚀 Бот работает!", 200
+    else:
+        return "⚠️ Бот не запущен или завершился!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000, debug=True)
