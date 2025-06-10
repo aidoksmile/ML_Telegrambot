@@ -75,7 +75,7 @@ def process_symbol(symbol):
 
     try:
         X, y = model.prepare_features(df, config.LOOKAHEAD_DAYS)
-        print(f"[DEBUG] Features для {symbol}: X.shape={X.shape}, y.shape={y.shape}")
+        print(f"[DEBUG] Признаки для {symbol}: X.shape={X.shape}, y.shape={y.shape}")
         if X.empty or y.empty:
             error_msg = f"❌ Недостаточно данных для обучения модели {symbol}"
             print(error_msg)
@@ -129,12 +129,13 @@ def process_symbol(symbol):
 def main():
     print(f"[CONFIG] ASSETS: {config.ASSETS}, UPDATE_INTERVAL: {config.UPDATE_INTERVAL}")
     print("[START] Запуск бота...")
-    send_telegram_message("🟢 Бот запущен и готов к работе!")
+    if send_telegram_message("🟢 Бот запущен и готов к работе!") is None:
+        print("[ERROR] Не удалось отправить стартовое сообщение в Telegram")
     print("[Бот запущен]")
 
     while True:
         try:
-            for symbol in config.ASSETS:
+            for symbol in config.ASSETS:  # Теперь итерируемся по списку
                 process_symbol(symbol)
             print(f"[Сон...] Следующее обновление через {config.UPDATE_INTERVAL} секунд")
             time.sleep(config.UPDATE_INTERVAL)
