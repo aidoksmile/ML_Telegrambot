@@ -5,6 +5,8 @@ from sklearn.metrics import accuracy_score
 import config
 import requests
 import time
+import requests
+import json
 
 def fetch_data(symbol):
     try:
