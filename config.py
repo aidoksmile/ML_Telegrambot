@@ -1,7 +1,7 @@
 # config.py
 
-TELEGRAM_BOT_TOKEN = "8132037717:AAHK04i4cHkgqH-Qyiy7OHs73xbXmvqnlpc"  # Получите через @BotFather
-TELEGRAM_CHAT_ID = "106240757"      # Получите через getUpdates
+TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"  # Получите через @BotFather
+TELEGRAM_CHAT_ID = "TELEGRAM_CHAT_ID"      # Получите через getUpdates
 
 ALPHA_VANTAGE_API_KEY = "WEGYRA74P069BV6J"    # Ваш API-ключ Alpha Vantage
 
