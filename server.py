@@ -8,7 +8,7 @@ import logging
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-@app.route("")
+@app.route("/")
 def start_bot():
     def run_bot():
         try:
