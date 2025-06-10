@@ -9,6 +9,7 @@ import model
 from strategy import MLStrategy
 from backtesting import Backtest
 
+print("[INFO] main.py загружен")
 
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage" 
@@ -86,6 +87,7 @@ def process_symbol(symbol):
 
 
 def main():
+    print("[START] Запуск бота...")
     print("[Бот запущен]")
     send_telegram_message("🟢 Бот запущен и готов к работе!")
 
