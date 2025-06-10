@@ -7,7 +7,7 @@ import config
 
 def fetch_data(symbol):
     try:
-        ticker = config.TICKER_MAP[symbol]  # Используем TICKER_MAP
+        ticker = config.TICKER_MAP[symbol]
         df = yf.download(ticker, period=f"{config.HISTORY_LIMIT}d", interval=config.TIMEFRAME)
         if df.empty:
             raise ValueError(f"Данные для {ticker} пусты")
@@ -22,21 +22,37 @@ def fetch_data(symbol):
 
 def prepare_features(df, lookahead_days=4):
     try:
+        # Создаём копию DataFrame, чтобы избежать изменений оригинала
+        df = df.copy()
+        
+        # Проверяем, достаточно ли данных
+        if len(df) < 50:  # Для ma_long требуется минимум 50 строк
+            raise ValueError(f"Недостаточно данных: {len(df)} строк, требуется минимум 50")
+
         steps = lookahead_days
+        # Создаём target с использованием shift
         df['target'] = df['close'].shift(-steps)
+        # Удаляем строки с NaN в target заранее
+        df = df.dropna(subset=['target'])
+
+        # Вычисляем direction
         df['direction'] = (df['target'] > df['close']).astype(int)
 
+        # Вычисляем признаки
         df['ma_short'] = df['close'].rolling(10).mean()
         df['ma_long'] = df['close'].rolling(50).mean()
         df['volatility'] = df['high'] - df['low']
         df['momentum'] = df['close'].diff(5)
 
-        df.dropna(inplace=True)
+        # Удаляем все строки с NaN после вычисления признаков
+        df = df.dropna()
         if df.empty:
             raise ValueError("После обработки данных DataFrame пуст")
+
         features = ['open', 'high', 'low', 'close', 'volume', 'ma_short', 'ma_long', 'volatility', 'momentum']
         X = df[features]
         y = df['direction']
+
         print(f"[DEBUG] Подготовлены признаки: X.shape={X.shape}, y.shape={y.shape}")
         return X, y
     except Exception as e:
