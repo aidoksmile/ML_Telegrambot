@@ -1,47 +1,53 @@
-from flask import Flask
-import threading
-import main
 import logging
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+import time
+from main import process_assets, send_telegram_message
+import config
 
-app = Flask(__name__)
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler('bot.log')]
+    filename="bot.log",
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-bot_running = False
-bot_thread = None
-
-@app.route("/")
-def start_bot():
-    global bot_running, bot_thread
-    app.logger.info("Получен запрос к /")
-
-    if bot_running:
-        app.logger.info("Бот уже запущен")
-        return "🚀 Бот уже запущен!", 200
-
-    def run_bot():
+class RequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        logging.info("Получен HTTP-запрос")
         try:
-            app.logger.info("Запуск main.main()")
-            main.main()
+            threading.Thread(target=process_assets, daemon=True).start()
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Request received, processing assets in background")
         except Exception as e:
-            app.logger.error(f"Ошибка в основном цикле: {e}")
+            logging.error(f"Ошибка обработки запроса: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(f"Error: {e}".encode())
 
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
-    bot_running = True
-    app.logger.info("Бот запущен в фоне")
-    return "🚀 Бот запущен в фоне!", 200
+def run_server():
+    server_address = ("", 10000)
+    httpd = HTTPServer(server_address, RequestHandler)
+    logging.info("Запуск HTTP-сервера на порту 10000")
+    httpd.serve_forever()
 
-@app.route("/status")
-def check_status():
-    if bot_running and bot_thread.is_alive():
-        return "🚀 Бот работает!", 200
-    else:
-        return "⚠️ Бот не запущен или завершился!", 200
+def periodic_processing():
+    logging.info("Запуск периодической обработки активов")
+    while True:
+        try:
+            process_assets()
+            logging.info(f"Ожидание {config.UPDATE_INTERVAL} секунд до следующей обработки")
+        except Exception as e:
+            logging.error(f"Ошибка в периодической обработке: {e}")
+            send_telegram_message(f"❌ Ошибка в периодической обработке: {e}")
+        time.sleep(config.UPDATE_INTERVAL)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000, debug=True)
+    logging.info("Запуск бота")
+    threading.Thread(target=periodic_processing, daemon=True).start()
+    try:
+        run_server()
+    except Exception as e:
+        logging.error(f"Ошибка сервера: {e}")
+        send_telegram_message(f"❌ Ошибка сервера: {e}")
