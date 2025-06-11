@@ -137,3 +137,74 @@ async def fetch_data(symbol):
 
                 required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
                 if not all(col in df.columns for col in required_cols):
+                                        logging.error(f"Отсутствуют столбцы: {required_cols}, получено: {df.columns.tolist()}")
+                    raise ValueError(f"Отсутствуют столбцы: {required_cols}, получено: {df.columns.tolist()}")
+
+                logging.info(f"Успешно загружены данные для {symbol}: shape={df.shape}, columns={df.columns.tolist()}, timeframe={config.TIMEFRAME.get(symbol)}")
+                return df[required_cols]
+
+            except Exception as e:
+                logging.error(f"Ошибка получения свечей на попытке {attempt + 1} для {symbol}: {e}")
+                if attempt < 2:
+                    logging.info(f"Повтор через 5 секунд")
+                    await asyncio.sleep(5)
+                else:
+                    raise ValueError(f"Не удалось загрузить данные для {symbol} после 3 попыток: {e}")
+
+    except Exception as e:
+        logging.error(f"Общая ошибка загрузки данных для {symbol}: {e}")
+        raise Exception(f"Ошибка загрузки данных для {symbol}: {e}")
+    finally:
+        # Безопасное отключение
+        try:
+            if account is not None:
+                logging.info(f"Отключение аккаунта для {symbol}")
+                await account.disconnect()
+            if api is not None:
+                logging.debug("Отключение MetaApi")
+                await api.disconnect()
+        except Exception as e:
+            logging.warning(f"Ошибка при очистке ресурсов для {symbol}: {e}")
+
+# Для синхронного вызова
+def fetch_data_sync(symbol):
+    logging.debug(f"Синхронный запрос данных для {symbol}")
+    return asyncio.run(fetch_data(symbol))
+
+def prepare_features(df, lookahead_days=4):
+    logging.info("Подготовка признаков")
+    try:
+        df = df.copy()
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        if not all(col in df.columns for col in required_cols):
+            logging.error(f"Отсутствуют необходимые столбцы: {required_cols}, получено: {df.columns.tolist()}")
+            raise ValueError(f"Отсутствуют необходимые столбцы: {required_cols}, получено: {df.columns.tolist()}")
+
+        df = df.reset_index(drop=True)
+        logging.debug(f"Исходный DataFrame: shape={df.shape}, columns={df.columns.tolist()}")
+
+        steps = lookahead_days
+        if len(df) < steps + 50:
+            logging.error(f"Недостаточно данных: {len(df)} строк, требуется минимум {steps + 50}")
+            raise ValueError(f"Недостаточно данных: {len(df)} строк, требуется минимум {steps + 50}")
+
+        df['target'] = df['close'].shift(-steps)
+        if df['target'].isna().all():
+            logging.error(f"Столбец 'target' содержит только NaN, недостаточно данных для сдвига на {steps}")
+            raise ValueError(f"Столбец 'target' содержит только NaN, недостаточно данных для сдвига на {steps}")
+
+        df = df.dropna(subset=['target', 'close'])
+        if df.empty:
+            logging.error("DataFrame пуст после удаления NaN в 'target' и 'close'")
+            raise ValueError("DataFrame пуст после удаления NaN в 'target' и 'close'")
+
+        df['direction'] = (df['target'] > df['close']).astype(int)
+
+        df['ma_short'] = df['close'].rolling(window=10, min_periods=10).mean()
+        df['ma_long'] = df['close'].rolling(window=50, min_periods=50).mean()
+        df['volatility'] = df['high'] - df['low']
+        df['momentum'] = df['close'].diff(5)
+
+        df = df.dropna()
+        if df.empty:
+            logging.error("DataFrame пуст после удаления NaN для признаков")
