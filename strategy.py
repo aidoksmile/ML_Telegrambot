@@ -1,7 +1,4 @@
-# strategy.py
-
 from backtesting import Strategy
-
 
 class MLStrategy(Strategy):
     def init(self):
