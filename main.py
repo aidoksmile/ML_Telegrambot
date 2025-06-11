@@ -32,7 +32,7 @@ def process_assets():
             df = model.fetch_data(symbol)
             X, y = model.prepare_features(df, config.LOOKAHEAD_DAYS)
             params = model.optimize_model_params(X, y)
-            model_instance = model.train_model(X, y, params)
+            model_instance = model.train_model(X, y)
             
             latest_data = X.iloc[-1].values.reshape(1, -1)
             prediction = model_instance.predict(latest_data)[0]
@@ -42,7 +42,7 @@ def process_assets():
             message = (
                 f"📊 Прогноз для {symbol} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):\n"
                 f"Направление: {direction}\n"
-                f"Вероятность: {probability:.2%}\n"
+                f"Вероятность: {probability:. unenтеля:.2%}\n"
                 f"Текущая цена: {df['close'].iloc[-1]:.4f}"
             )
             send_telegram_message(message)
