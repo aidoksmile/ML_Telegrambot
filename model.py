@@ -3,89 +3,70 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import accuracy_score
 import config
-import requests
+import MetaTrader5 as mt5
 import time
-import requests
-import json
 
 def fetch_data(symbol):
     try:
-        ticker = config.TICKER_MAP[symbol]
-        timeframe = config.TIMEFRAME.get(symbol, "MINUTE_15")
-        session_url = f"{config.BASE_URL}/api/v1/session"
-        prices_url = f"{config.BASE_URL}/api/v1/prices/{ticker}"
+        # Инициализация MT5
+        if not mt5.initialize(login=config.MT4_LOGIN, password=config.MT4_PASSWORD, server=config.MT4_SERVER):
+            raise ValueError(f"Не удалось инициализировать MT5: {mt5.last_error()}")
 
-        # Авторизация
-        headers = {
-            "Content-Type": "application/json"
+        # Проверка доступности символа
+        if not mt5.symbol_select(symbol, True):
+            mt5.shutdown()
+            raise ValueError(f"Символ {symbol} недоступен: {mt5.last_error()}")
+
+        # Получение таймфрейма
+        timeframe_map = {
+            "M15": mt5.TIMEFRAME_M15,
+            # Добавьте другие таймфреймы, если нужно
         }
-        payload = {
-            "identifier": config.CAPITAL_EMAIL,
-            "password": config.CAPITAL_PASSWORD,
-            "encryptedPassword": False
-        }
-        for attempt in range(3):
-            try:
-                response = requests.post(session_url, headers=headers, json=payload)
-                response.raise_for_status()
-                session_data = response.json()
-                cst = response.headers.get("CST")
-                security_token = response.headers.get("X-SECURITY-TOKEN")
-                if not cst or not security_token:
-                    raise ValueError("Не удалось получить CST или X-SECURITY-TOKEN")
-                break
-            except Exception as e:
-                if attempt < 2:
-                    print(f"[WARNING] Попытка авторизации {attempt + 1} не удалась: {e}, повтор через 5 секунд")
-                    time.sleep(5)
-                else:
-                    raise ValueError(f"Не удалось авторизоваться после 3 попыток: {e}")
+        timeframe = timeframe_map.get(config.TIMEFRAME.get(symbol, "M15"), mt5.TIMEFRAME_M15)
 
         # Запрос исторических данных
-        headers = {
-            "CST": cst,
-            "X-SECURITY-TOKEN": security_token
-        }
-        params = {
-            "resolution": timeframe,
-            "maxReturn": config.HISTORY_LIMIT
-        }
         for attempt in range(3):
             try:
-                response = requests.get(prices_url, headers=headers, params=params)
-                response.raise_for_status()
-                data = response.json()
-                if "prices" not in data:
-                    raise ValueError(f"Данные для {ticker} отсутствуют: {data.get('error', 'No data')}")
-                df = pd.DataFrame(data["prices"])
+                rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, config.HISTORY_LIMIT)
+                if rates is None or len(rates) == 0:
+                    raise ValueError(f"Данные для {symbol} отсутствуют: {mt5.last_error()}")
+                
+                df = pd.DataFrame(rates)
                 df = df.rename(columns={
-                    "snapshotTimeUTC": "timestamp",
-                    "openPrice": "open",
-                    "highPrice": "high",
-                    "lowPrice": "low",
-                    "closePrice": "close",
-                    "volume": "volume"
+                    "time": "timestamp",
+                    "open": "open",
+                    "high": "high",
+                    "low": "low",
+                    "close": "close",
+                    "tick_volume": "volume"
                 })
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
-                for col in ["open", "high", "low", "close"]:
-                    df[col] = pd.to_numeric(df[col].apply(lambda x: x.get("bid") if isinstance(x, dict) else x), errors="coerce")
-                df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce")
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+                df = df[["timestamp", "open", "high", "low", "close", "volume"]]
                 df = df.sort_values("timestamp").tail(config.HISTORY_LIMIT)
+                
                 if df.empty or len(df) < 50:
-                    raise ValueError(f"Недостаточно данных для {ticker}: {len(df)} строк")
+                    raise ValueError(f"Недостаточно данных для {symbol}: {len(df)} строк")
+                
                 required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
                 if not all(col in df.columns for col in required_cols):
                     raise ValueError(f"Отсутствуют столбцы: {required_cols}, получено: {df.columns.tolist()}")
-                print(f"[DEBUG] Загружены данные для {symbol} ({ticker}): shape={df.shape}, columns={df.columns.tolist()}, timeframe={timeframe}")
+                
+                print(f"[DEBUG] Загружены данные для {symbol}: shape={df.shape}, columns={df.columns.tolist()}, timeframe={config.TIMEFRAME.get(symbol)}")
+                mt5.shutdown()
                 return df[required_cols]
+            
             except Exception as e:
                 if attempt < 2:
-                    print(f"[WARNING] Попытка {attempt + 1} не удалась для {ticker}: {e}, повтор через 5 секунд")
+                    print(f"[WARNING] Попытка {attempt + 1} не удалась для {symbol}: {e}, повтор через 5 секунд")
                     time.sleep(5)
                 else:
-                    raise
-        raise ValueError(f"Не удалось загрузить данные для {ticker} после 3 попыток")
+                    mt5.shutdown()
+                    raise ValueError(f"Не удалось загрузить данные для {symbol} после 3 попыток: {e}")
+        
+        raise ValueError(f"Не удалось загрузить данные для {symbol} после 3 попыток")
+    
     except Exception as e:
+        mt5.shutdown()
         raise Exception(f"Ошибка загрузки данных для {symbol}: {e}")
 
 def prepare_features(df, lookahead_days=4):
