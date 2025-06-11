@@ -3,44 +3,45 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import accuracy_score
 import config
-import MetaTrader5 as mt5
+from metaapi_cloud_sdk import MetaApi
 import time
+import asyncio
 
-def fetch_data(symbol):
+async def fetch_data(symbol):
     try:
-        # Инициализация MT5
-        if not mt5.initialize(login=config.MT4_LOGIN, password=config.MT4_PASSWORD, server=config.MT4_SERVER):
-            raise ValueError(f"Не удалось инициализировать MT5: {mt5.last_error()}")
-
-        # Проверка доступности символа
-        if not mt5.symbol_select(symbol, True):
-            mt5.shutdown()
-            raise ValueError(f"Символ {symbol} недоступен: {mt5.last_error()}")
+        # Инициализация MetaApi
+        api = MetaApi(token=config.METAAPI_TOKEN)
+        account = await api.metatrader_account_api.get_account(config.MT4_ACCOUNT_ID)
+        await account.connect()
 
         # Получение таймфрейма
         timeframe_map = {
-            "M15": mt5.TIMEFRAME_M15,
+            "15m": "15m",
             # Добавьте другие таймфреймы, если нужно
         }
-        timeframe = timeframe_map.get(config.TIMEFRAME.get(symbol, "M15"), mt5.TIMEFRAME_M15)
+        timeframe = timeframe_map.get(config.TIMEFRAME.get(symbol, "15m"), "15m")
 
         # Запрос исторических данных
         for attempt in range(3):
             try:
-                rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, config.HISTORY_LIMIT)
-                if rates is None or len(rates) == 0:
-                    raise ValueError(f"Данные для {symbol} отсутствуют: {mt5.last_error()}")
+                candles = await account.get_historical_candles(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    count=config.HISTORY_LIMIT
+                )
+                if not candles or len(candles) == 0:
+                    raise ValueError(f"Данные для {symbol} отсутствуют")
                 
-                df = pd.DataFrame(rates)
-                df = df.rename(columns={
+                df = pd.DataFrame(candles)
+                df = df.rename(columnsVacation: {
                     "time": "timestamp",
                     "open": "open",
                     "high": "high",
                     "low": "low",
                     "close": "close",
-                    "tick_volume": "volume"
+                    "tickVolume": "volume"
                 })
-                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
                 df = df[["timestamp", "open", "high", "low", "close", "volume"]]
                 df = df.sort_values("timestamp").tail(config.HISTORY_LIMIT)
                 
@@ -52,7 +53,7 @@ def fetch_data(symbol):
                     raise ValueError(f"Отсутствуют столбцы: {required_cols}, получено: {df.columns.tolist()}")
                 
                 print(f"[DEBUG] Загружены данные для {symbol}: shape={df.shape}, columns={df.columns.tolist()}, timeframe={config.TIMEFRAME.get(symbol)}")
-                mt5.shutdown()
+                await account.disconnect()
                 return df[required_cols]
             
             except Exception as e:
@@ -60,14 +61,18 @@ def fetch_data(symbol):
                     print(f"[WARNING] Попытка {attempt + 1} не удалась для {symbol}: {e}, повтор через 5 секунд")
                     time.sleep(5)
                 else:
-                    mt5.shutdown()
+                    await account.disconnect()
                     raise ValueError(f"Не удалось загрузить данные для {symbol} после 3 попыток: {e}")
         
         raise ValueError(f"Не удалось загрузить данные для {symbol} после 3 попыток")
     
     except Exception as e:
-        mt5.shutdown()
+        await account.disconnect()
         raise Exception(f"Ошибка загрузки данных для {symbol}: {e}")
+
+# Для синхронного вызова
+def fetch_data_sync(symbol):
+    return asyncio.run(fetch_data(symbol))
 
 def prepare_features(df, lookahead_days=4):
     try:
@@ -143,7 +148,7 @@ def train_model(X, y):
     try:
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-        model = RandomForestClassifier(n_estimators=50)
+        model = RandomForestClassifier(n_estimators=100)
         model.fit(X_train, y_train)
         accuracy = accuracy_score(y_test, model.predict(X_test))
         print(f"Точность модели: {accuracy * 100:.2f}%")
