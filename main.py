@@ -4,6 +4,7 @@ import config
 import requests
 import time
 from datetime import datetime
+import asyncio
 
 logging.basicConfig(
     filename="bot.log",
@@ -24,15 +25,14 @@ def send_telegram_message(message):
     except Exception as e:
         logging.error(f"Ошибка отправки сообщения в Telegram: {e}")
 
-def process_assets():
+async def process_assets():
     logging.info("Начало обработки активов")
     for symbol in config.ASSETS:
         try:
             logging.info(f"Обработка актива: {symbol}")
-            df = model.fetch_data(symbol)
+            df = await model.fetch_data(symbol)
             X, y = model.prepare_features(df, config.LOOKAHEAD_DAYS)
-            params = model.optimize_model_params(X, y)
-            model_instance = model.train_model(X, y)
+            model_instance, _ = model.optimize_model_params(X, y)
             
             latest_data = X.iloc[-1].values.reshape(1, -1)
             prediction = model_instance.predict(latest_data)[0]
@@ -42,7 +42,7 @@ def process_assets():
             message = (
                 f"📊 Прогноз для {symbol} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):\n"
                 f"Направление: {direction}\n"
-                f"Вероятность: {probability:. unenтеля:.2%}\n"
+                f"Вероятность: {probability:.2%}\n"
                 f"Текущая цена: {df['close'].iloc[-1]:.4f}"
             )
             send_telegram_message(message)
@@ -53,4 +53,4 @@ def process_assets():
             send_telegram_message(error_message)
 
 if __name__ == "__main__":
-    process_assets()
+    asyncio.run(process_assets())
