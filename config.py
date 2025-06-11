@@ -11,8 +11,8 @@ TICKER_MAP = {
     "EURUSD": "EURUSD"
 }
 TIMEFRAME = {
-    "XAUUSD": "M15",
-    "EURUSD": "M15"
+    "XAUUSD": "15m",
+    "EURUSD": "15m"
 }
 LOOKAHEAD_DAYS = 4        # 4 * 15 минут = 1 час
 HISTORY_LIMIT = 200       # ~50 часов данных
