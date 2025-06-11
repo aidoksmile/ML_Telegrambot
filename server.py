@@ -3,6 +3,7 @@ import threading
 import time
 from main import process_assets, send_telegram_message
 import config
+import asyncio
 
 logging.basicConfig(
     filename="bot.log",
@@ -10,11 +11,11 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-def periodic_processing():
+async def periodic_processing():
     logging.info("Запуск периодической обработки активов")
     while True:
         try:
-            process_assets()
+            await process_assets()
             logging.info(f"Ожидание {config.UPDATE_INTERVAL} секунд до следующей обработки")
         except Exception as e:
             logging.error(f"Ошибка в периодической обработке: {e}")
@@ -23,7 +24,11 @@ def periodic_processing():
 
 if __name__ == "__main__":
     logging.info("Запуск бота")
-    threading.Thread(target=periodic_processing, daemon=True).start()
+    # Запуск асинхронной функции в отдельном потоке
+    def run_async_loop():
+        asyncio.run(periodic_processing())
+    
+    threading.Thread(target=run_async_loop, daemon=True).start()
     # Бесконечный цикл для работы на Render
     try:
         while True:
