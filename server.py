@@ -1,17 +1,18 @@
 import logging
-import threading
 import time
 from main import process_assets, send_telegram_message
 import config
 import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Настройка логирования
+# Настройка логирования в файл и консоль
 logging.basicConfig(
-    filename="bot.log",
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    filemode="a"  # Добавляем, чтобы не перезаписывать лог
+    handlers=[
+        logging.FileHandler("bot.log", mode="a"),
+        logging.StreamHandler()  # Вывод в консоль
+    ]
 )
 
 # Минимальный HTTP-обработчик для Render
@@ -43,30 +44,32 @@ async def periodic_processing():
                 send_telegram_message(f"❌ {error_msg}")
             except Exception as telegram_error:
                 logging.error(f"Ошибка отправки в Telegram: {telegram_error}")
-        time.sleep(config.UPDATE_INTERVAL)
+        await asyncio.sleep(config.UPDATE_INTERVAL)
 
-def run_async_loop():
+async def main():
+    logging.info("Запуск бота")
+    # Отправка тестового сообщения в Telegram при старте
     try:
-        logging.info("Запуск асинхронного цикла")
-        asyncio.run(periodic_processing())
+        send_telegram_message("✅ Бот запущен на Render")
+        logging.info("Тестовое сообщение отправлено в Telegram")
     except Exception as e:
-        logging.error(f"Ошибка в асинхронном цикле: {str(e)}")
+        logging.error(f"Ошибка отправки тестового сообщения в Telegram: {str(e)}")
 
-def run_http_server():
-    server_address = ('', 10000)
-    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
-    logging.info("Запуск HTTP-сервера на порту 10000")
-    try:
-        httpd.serve_forever()
-    except Exception as e:
-        logging.error(f"Ошибка HTTP-сервера: {str(e)}")
+    # Запуск HTTP-сервера в отдельном потоке
+    def run_http_server():
+        server_address = ('', 10000)
+        httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+        logging.info("Запуск HTTP-сервера на порту 10000")
+        try:
+            httpd.serve_forever()
+        except Exception as e:
+            logging.error(f"Ошибка HTTP-сервера: {str(e)}")
+
+    import threading
+    threading.Thread(target=run_http_server, daemon=True).start()
+
+    # Запуск периодической обработки
+    await periodic_processing()
 
 if __name__ == "__main__":
-    logging.info("Запуск бота")
-    # Запуск асинхронной обработки в отдельном потоке
-    threading.Thread(target=run_async_loop, daemon=True).start()
-    # Запуск HTTP-сервера в главном потоке
-    try:
-        run_http_server()
-    except KeyboardInterrupt:
-        logging.info("Остановка бота")
+    asyncio.run(main())
