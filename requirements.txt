@@ -1,4 +1,4 @@
-yfinance
+MetaTrader5
 pandas
 numpy
 scikit-learn
