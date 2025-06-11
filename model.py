@@ -33,7 +33,7 @@ async def fetch_data(symbol):
                     raise ValueError(f"Данные для {symbol} отсутствуют")
                 
                 df = pd.DataFrame(candles)
-                df = df.rename(columnsVacation: {
+                df = df.rename(columns={
                     "time": "timestamp",
                     "open": "open",
                     "high": "high",
