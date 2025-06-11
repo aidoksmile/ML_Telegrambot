@@ -2,7 +2,7 @@ TELEGRAM_BOT_TOKEN = "8132037717:AAHK04i4cHkgqH-Qyiy7OHs73xbXmvqnlpc"  # Пол�
 TELEGRAM_CHAT_ID = "106240757"      # Получите через getUpdates
 
 MT4_LOGIN = "420493"                    # Логин вашего MT4-аккаунта
-MT4_PASSWORD = "E28yCis42FBZVY!"              # Пароль вашего MT4-аккаунта
+MT4_PASSWORD = "MT4_PASSWORD"              # Пароль вашего MT4-аккаунта
 MT4_SERVER = "Capitol.com-Demo"                  # Сервер брокера (например, "MetaQuotes-Demo")
 
 ASSETS = ["XAUUSD", "EURUSD"]
