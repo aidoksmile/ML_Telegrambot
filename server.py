@@ -1,75 +1,39 @@
+import os
 import logging
-import time
-from main import process_assets, send_telegram_message
-import config
-import asyncio
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import aiohttp
+from aiohttp import web
 
-# Настройка логирования в файл и консоль
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log", mode="a"),
-        logging.StreamHandler()  # Вывод в консоль
-    ]
-)
+# Настройка логирования
+logging.basicConfig(filename="bot.log", level=logging.INFO, format="%(asctime)s - %(message)s")
 
-# Минимальный HTTP-обработчик для Render
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
-        logging.info("Получен GET-запрос на /")
+# Конфигурация
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    logging.error("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
+    raise ValueError("Отсутствуют необходимые переменные окружения")
 
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        logging.info("Получен HEAD-запрос на /")
+async def send_message(message):
+    """Отправляет сообщение в Telegram."""
+    async with aiohttp.ClientSession() as session:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        async with session.post(url, json=payload) as response:
+            if response.status != 200:
+                logging.error(f"Ошибка Telegram: {await response.text()}")
+            else:
+                logging.info(f"Сообщение отправлено: {message}")
 
-async def periodic_processing():
-    logging.info("Запуск периодической обработки активов")
-    while True:
-        try:
-            logging.debug("Начало цикла обработки активов")
-            await process_assets()
-            logging.info(f"Обработка завершена, ожидание {config.UPDATE_INTERVAL} секунд")
-        except Exception as e:
-            error_msg = f"Ошибка в периодической обработке: {str(e)}"
-            logging.error(error_msg)
-            try:
-                send_telegram_message(f"❌ {error_msg}")
-            except Exception as telegram_error:
-                logging.error(f"Ошибка отправки в Telegram: {telegram_error}")
-        await asyncio.sleep(config.UPDATE_INTERVAL)
+async def health_check(request):
+    """Проверка работоспособности для Render."""
+    return web.Response(text="Bot is running")
 
-async def main():
-    logging.info("Запуск бота")
-    # Отправка тестового сообщения в Telegram при старте
-    try:
-        send_telegram_message("✅ Бот запущен на Render")
-        logging.info("Тестовое сообщение отправлено в Telegram")
-    except Exception as e:
-        logging.error(f"Ошибка отправки тестового сообщения в Telegram: {str(e)}")
-
-    # Запуск HTTP-сервера в отдельном потоке
-    def run_http_server():
-        server_address = ('', 10000)
-        httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
-        logging.info("Запуск HTTP-сервера на порту 10000")
-        try:
-            httpd.serve_forever()
-        except Exception as e:
-            logging.error(f"Ошибка HTTP-сервера: {str(e)}")
-
-    import threading
-    threading.Thread(target=run_http_server, daemon=True).start()
-
-    # Запуск периодической обработки
-    await periodic_processing()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+async def start_server():
+    """Запускает HTTP-сервер."""
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    logging.info("HTTP-сервер запущен")
