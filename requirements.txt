@@ -1,7 +1,6 @@
-metaapi-cloud-sdk
 pandas
-numpy
 scikit-learn
-backtesting
-requests
-flask
+yfinance
+aiohttp
+aiocron
+python-telegram-bot
