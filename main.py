@@ -8,12 +8,10 @@ from strategy import generate_signals
 
 # Настройка логирования
 logging.basicConfig(
-    filename="bot.log",
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler()  # Вывод в консоль
+        logging.StreamHandler()  # Вывод только в консоль для теста
     ]
 )
 
@@ -26,33 +24,33 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
 
 async def signal_command(update, context):
     """Обработчик команды /signal."""
+    logging.debug("Получена команда /signal")
     await update.message.reply_text("⏳ Генерация сигналов...")
     await generate_signals()
 
 async def main():
     """Главная функция."""
     try:
-        # Запуск Telegram-бота
+        logging.debug("Инициализация Telegram-бота")
         app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         app.add_handler(CommandHandler("signal", signal_command))
         await app.initialize()
         await app.start()
         logging.info("Telegram-бот запущен")
 
-        # Тестовое сообщение
+        logging.debug("Отправка тестового сообщения")
         await send_message("✅ Бот запущен")
 
-        # Запуск HTTP-сервера
+        logging.debug("Запуск HTTP-сервера")
         await start_server()
         logging.info("HTTP-сервер и Telegram-бот запущены")
 
-        # Планировщик: 01:00 UTC (6:00 +05)
+        logging.debug("Настройка планировщика")
         aiocron.crontab('0 1 * * *', func=generate_signals, start=True)
         logging.info("Планировщик запущен")
 
-        # Бесконечный цикл
-        while True:
-            await asyncio.sleep(3600)
+        # Удаляем бесконечный цикл, полагаемся на app.run_polling()
+        await app.run_polling()
 
     except Exception as e:
         logging.critical(f"Критическая ошибка: {e}")
