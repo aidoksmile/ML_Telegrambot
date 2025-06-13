@@ -7,7 +7,15 @@ from server import send_message, start_server
 from strategy import generate_signals
 
 # Настройка логирования
-logging.basicConfig(filename="bot.log", level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    filename="bot.log",
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()  # Вывод в консоль
+    ]
+)
 
 # Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
