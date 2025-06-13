@@ -3,7 +3,7 @@ import os
 import logging
 from telegram.ext import Application, CommandHandler
 import aiocron
-from server import send_message
+from server import send_message, start_server
 from strategy import generate_signals
 
 # Настройка логирования
@@ -33,6 +33,10 @@ async def main():
 
         # Тестовое сообщение
         await send_message("✅ Бот запущен")
+
+        # Запуск HTTP-сервера
+        await start_server()
+        logging.info("HTTP-сервер и Telegram-бот запущены")
 
         # Планировщик: 01:00 UTC (6:00 +05)
         aiocron.crontab('0 1 * * *', func=generate_signals, start=True)
