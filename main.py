@@ -38,7 +38,7 @@ def main():
 
         # Запуск Telegram-бота
         logging.info("Инициализация Telegram-бота...")
-        updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+        updater = Updater(TELEGRAM_BOT_TOKEN)  # Убрано use_context=True
         updater.dispatcher.add_handler(CommandHandler("signal", signal_command))
         updater.start_polling()
         logging.info("Telegram-бот запущен")
