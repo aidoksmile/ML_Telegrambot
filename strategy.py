@@ -19,17 +19,24 @@ TICKER_MAP = {"XAUUSD": "GC=F", "EURUSD": "EURUSD=X", "USDJPY": "JPY=X"}
 HISTORY_LIMIT = 200
 
 def fetch_data(symbol):
-    """Загружает данные с Yahoo Finance."""
+    """Загружает данные с Yahoo Finance с проверкой."""
     ticker = TICKER_MAP[symbol]
-    df = yf.download(ticker, period="60d", interval="15m")
-    if df.empty:
-        logging.error(f"Данные для {symbol} отсутствуют")
-        raise ValueError(f"Данные для {symbol} отсутствуют")
-    df = df[["Open", "High", "Low", "Close", "Volume"]].rename(columns={
-        "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"
-    })
-    df = df.tail(HISTORY_LIMIT)
-    return df
+    logging.info(f"Попытка загрузки данных для {symbol} (тикер: {ticker})...")
+    try:
+        df = yf.download(ticker, period="60d", interval="15m")
+        if df.empty:
+            logging.error(f"Данные для {symbol} ({ticker}) отсутствуют или недоступны")
+            raise ValueError(f"Данные для {symbol} отсутствуют или недоступны")
+        logging.info(f"Успешно загружено {len(df)} записей для {symbol}")
+        df = df[["Open", "High", "Low", "Close", "Volume"]].rename(columns={
+            "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"
+        })
+        df = df.tail(HISTORY_LIMIT)
+        logging.debug(f"Данные для {symbol} обрезаны до {HISTORY_LIMIT} записей")
+        return df
+    except Exception as e:
+        logging.error(f"Ошибка при загрузке данных для {symbol}: {e}")
+        raise
 
 def prepare_features(df):
     """Подготавливает признаки для модели."""
@@ -43,6 +50,7 @@ def prepare_features(df):
     df['momentum'] = df['close'].diff(5)
     df = df.dropna()
     features = ['open', 'high', 'low', 'close', 'volume', 'ma_short', 'ma_long', 'volatility', 'momentum']
+    logging.debug(f"Подготовлено {len(df)} записей с признаками для модели")
     return df[features], df['direction']
 
 def train_model(X, y):
@@ -63,6 +71,7 @@ def process_asset(symbol):
         model = train_model(X, y)
         latest = X.iloc[-1].values.reshape(1, -1)
         signal = "Покупка" if model.predict(latest)[0] == 1 else "Продажа"
+        logging.info(f"Сгенерирован сигнал для {symbol}: {signal}")
         send_message(f"📈 Сигнал для {symbol}: {signal}")
     except Exception as e:
         logging.error(f"Ошибка обработки {symbol}: {e}")
@@ -70,6 +79,7 @@ def process_asset(symbol):
 
 def generate_signals():
     """Генерирует сигналы для всех активов."""
-    logging.info("Генерация сигналов")
+    logging.info("Начало генерации сигналов")
     for symbol in ASSETS:
         process_asset(symbol)
+    logging.info("Генерация сигналов завершена")
