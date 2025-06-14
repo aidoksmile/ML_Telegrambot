@@ -19,12 +19,20 @@ MODEL_PATH = "model.pkl"
 ACCURACY_PATH = "accuracy.json"
 
 def prepare_data():
-    # Загрузка данных
     df = yf.download("EURUSD=X", interval="15m", period="6mo")
-    df['target'] = df['Close'].shift(-int(96 * 4))  # ~4 дня вперёд (15 мин свечи)
+    print(f"Downloaded {len(df)} rows.")
+
+    df['target'] = df['Close'].shift(-int(96 * 4))  # Прогноз на 4 дня вперёд
+    print(f"Before dropna: {len(df)}")
+
     df.dropna(inplace=True)
+    print(f"After dropna: {len(df)}")
+
+    if len(df) < 100:
+        raise ValueError("Недостаточно данных для обучения модели.")
+
     X = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    y = (df['target'] > df['Close']).astype(int)  # 1 - рост, 0 - падение
+    y = (df['target'] > df['Close']).astype(int)
     return X, y
 
 def train_model():
