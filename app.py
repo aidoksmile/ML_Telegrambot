@@ -68,19 +68,12 @@ def prepare_data():
     if df.empty:
         raise ValueError("Empty data received from Yahoo Finance.")
 
-    print(f"Downloaded {len(df)} rows, from {df.index[0]} to {df.index[-1]}")
-
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
 
     df = df[(df['Close'] > 0) & (df['Open'] > 0)]
-    print(f"After filtering Open/Close > 0: {len(df)} rows")
-
     df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
     df['Target'] = df['Close'].shift(-HORIZON_PERIODS)
-
-    if df['Target'].isna().all():
-        raise ValueError("Target column contains only NaNs.")
 
     df['RSI'] = compute_rsi(df['Close'])
     df['MA20'] = df['Close'].rolling(window=20).mean()
@@ -92,9 +85,7 @@ def prepare_data():
     df['PriceChange'] = df['Close'].pct_change()
     df = df[df['PriceChange'].abs() < 0.1]
 
-    initial_rows = len(df)
     df = df.dropna()
-    print(f"After dropna: {len(df)} rows (dropped {initial_rows - len(df)})")
 
     if len(df) < MIN_DATA_ROWS:
         raise ValueError(f"Insufficient data: {len(df)} rows, required {MIN_DATA_ROWS}")
@@ -104,12 +95,10 @@ def prepare_data():
     y = (df['Target'] > df['Close']).astype(int)
 
     X = X.replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(method='bfill')
-
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
 
-    print(f"X shape: {X.shape}, y distribution: {y.value_counts().to_dict()}")
     return X, y, scaler
 
 
@@ -122,51 +111,44 @@ def train_model():
 
     tscv = TimeSeriesSplit(n_splits=CV_FOLDS)
 
-    initial_params = {
-        'n_estimators': 131,
-        'max_depth': 10,
-        'learning_rate': 0.08801373270230743,
-        'subsample': 0.6955968252605201,
-        'min_child_samples': 17,
-        'min_gain_to_split': 0.03986836820081445
-    }
-
     def objective(trial):
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 50, 150),
-            'max_depth': trial.suggest_int('max_depth', 3, 10),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
+            'n_estimators': trial.suggest_int('n_estimators', 50, 200),
+            'max_depth': trial.suggest_int('max_depth', 3, 12),
+            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.1, log=True),
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            'min_child_samples': trial.suggest_int('min_child_samples', 10, 50),
-            'min_gain_to_split': trial.suggest_float('min_gain_to_split', 0.0, 0.1),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'min_child_samples': trial.suggest_int('min_child_samples', 10, 100),
+            'min_gain_to_split': trial.suggest_float('min_gain_to_split', 0.0, 0.2),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'scale_pos_weight': trial.suggest_float('scale_pos_weight', 0.5, 2.0),
         }
 
-        acc_scores = []
-        for train_index, test_index in tscv.split(X):
-            X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-            y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-
+        scores = []
+        for train_idx, test_idx in tscv.split(X):
             model = LGBMClassifier(**params, random_state=42, force_col_wise=True, verbose=-1)
-            model.fit(X_train, y_train)
-            preds = model.predict(X_test)
-            acc = accuracy_score(y_test, preds)
-            acc_scores.append(acc)
+            model.fit(X.iloc[train_idx], y.iloc[train_idx])
+            preds = model.predict(X.iloc[test_idx])
+            score = accuracy_score(y.iloc[test_idx], preds)
+            scores.append(score)
 
-        return np.mean(acc_scores)
+        return np.mean(scores)
 
-    print("🔍 Starting Optuna hyperparameter search with TimeSeriesSplit...")
-    study = optuna.create_study(direction="maximize")
-    study.enqueue_trial(initial_params)  # Стартовые параметры
-    study.optimize(objective, timeout=MAX_TRAINING_TIME)
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(
+        objective,
+        timeout=MAX_TRAINING_TIME,
+        callbacks=[optuna.study.MaxTrialsCallback(50, states=(optuna.trial.TrialState.COMPLETE,))],
+        n_jobs=1,
+        show_progress_bar=False
+    )
 
     best_params = study.best_params
-    best_acc = study.best_value
+    best_score = study.best_value
 
-    print(f"✅ Optuna best accuracy (CV avg): {best_acc:.4f}")
-    print(f"📋 Best params: {best_params}")
-
-    if best_acc < MIN_ACCURACY_FOR_SIGNAL:
-        print(f"❌ Accuracy {best_acc:.2f} too low. No model saved.")
+    if best_score < MIN_ACCURACY_FOR_SIGNAL:
+        print(f"❌ Accuracy {best_score:.2f} too low. No model saved.")
         return
 
     final_model = LGBMClassifier(**best_params, random_state=42, force_col_wise=True, verbose=-1)
@@ -175,10 +157,12 @@ def train_model():
     joblib.dump({'model': final_model, 'scaler': scaler}, MODEL_PATH)
     with open(ACCURACY_PATH, "w") as f:
         json.dump({
-            "accuracy": best_acc,
+            "accuracy": best_score,
             "last_trained": str(datetime.now()),
             "best_params": best_params
         }, f)
+
+    study.trials_dataframe().to_csv("optuna_trials_log.csv", index=False)
 
     generate_signal(final_model, scaler, X.iloc[-1:], X.index[-1])
 
