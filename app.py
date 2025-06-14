@@ -26,36 +26,51 @@ MIN_DATA_ROWS = 100  # Минимальное количество строк д
 
 def prepare_data():
     print("Загрузка данных из Yahoo Finance...")
-    df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD)
+    try:
+        df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD)
+    except Exception as e:
+        raise ValueError(f"Ошибка при загрузке данных из Yahoo Finance: {str(e)}")
 
     if df.empty:
-        raise ValueError("Не удалось загрузить данные из Yahoo Finance.")
+        raise ValueError("Данные из Yahoo Finance пусты.")
 
     print(f"Downloaded {len(df)} rows.")
 
-    # Check for missing values and handle them
-    if df[['Open', 'High', 'Low', 'Close', 'Volume']].isna().any().any():
-        print("Warning: Missing values detected in data. Filling with forward fill.")
-        df = df.fillna(method='ffill').fillna(method='bfill')  # Forward and backward fill
+    # Check for required columns
+    required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Отсутствуют необходимые столбцы: {missing_columns}")
 
-    # Create target column (shift Close price for forecast horizon)
+    # Check for missing values in 'Close' column
+    if df['Close'].isna().all():
+        raise ValueError("Столбец 'Close' содержит только NaN значения.")
+    if df['Close'].isna().any():
+        print("Warning: Обнаружены пропущенные значения в столбце 'Close'. Заполняем их.")
+        df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
+
+    # Create target column
     df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Forecast 1 day ahead (~96 15-min candles)
 
-    # Drop rows where target is NaN (due to shift)
-    df = df.dropna(subset=['target'])
+    # Check if 'target' column was created successfully
+    if 'target' not in df.columns:
+        raise ValueError("Не удалось создать столбец 'target'.")
 
-    print(f"After dropping NaN target rows: {len(df)}")
+    # Drop rows where 'target' is NaN
+    initial_rows = len(df)
+    df = df.dropna(subset=['target'])
+    print(f"After dropping NaN target rows: {len(df)} (removed {initial_rows - len(df)} rows)")
 
     if len(df) < MIN_DATA_ROWS:
-        raise ValueError(f"Недостаточно данных для обучения модели. Available rows: {len(df)}")
+        raise ValueError(f"Недостаточно данных для обучения модели. Available rows: {len(df)}, required: {MIN_DATA_ROWS}")
 
-    # Ensure indices are aligned for features and target
+    # Prepare features and target
     X = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
     y = (df['target'] > df['Close']).astype(int)  # 1 for rise, 0 for fall
 
     # Verify alignment of X and y
     if len(X) != len(y):
-        raise ValueError(f"X and y are not aligned: X has {len(X)} rows, y has {len(y)} rows")
+        raise ValueError(f"X и y не выровнены: X имеет {len(X)} строк, y имеет {len(y)} строк")
 
     return X, y
 
