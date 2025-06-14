@@ -34,19 +34,20 @@ def prepare_data():
     print(f"Downloaded {len(df)} rows.")
     df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Прогноз на 1 день вперёд
 
-    # Явно выровняй колонки по индексам
-    df['target'], df['Close'] = df['target'].align(df['Close'], axis=0, fill_value=np.nan)
+    # Получаем общие индексы
+    common_idx = df.index.intersection(df['target'].dropna().index)
+    
+    # Фильтруем DataFrame только по тем строкам, где есть значения target
+    df_filtered = df.loc[common_idx].copy()
 
-    df.dropna(inplace=True)
-    print(f"After dropna: {len(df)}")
+    print(f"After filtering: {len(df_filtered)}")
 
-    if len(df) < MIN_DATA_ROWS:
+    if len(df_filtered) < MIN_DATA_ROWS:
         raise ValueError("Недостаточно данных для обучения модели.")
 
-    X = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    y = (df['target'] > df['Close']).astype(int)  # 1 - рост, 0 - падение
+    X = df_filtered[['Open', 'High', 'Low', 'Close', 'Volume']]
+    y = (df_filtered['target'] > df_filtered['Close']).astype(int)  # 1 - рост, 0 - падение
     return X, y
-
 
 def train_model():
     try:
