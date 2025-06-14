@@ -72,13 +72,18 @@ def prepare_data():
     if missing_cols:
         raise ValueError(f"Missing columns: {missing_cols}")
 
+    # Фильтрация аномалий
+    df = df[(df['Close'] > 0) & (df['Open'] > 0) & (df['Volume'] > 0)]
     if df['Close'].isna().any():
         print("Filling NaN values in 'Close'...")
         df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
 
-    # Фильтрация аномалий
-    df = df[df['Volume'] > 0]  # Удаляем строки с нулевым объёмом
-    df = df[(df['Close'] > 0) & (df['Open'] > 0)]  # Удаляем нулевые цены
+    # Создание Target до расчёта индикаторов
+    df['Target'] = df['Close'].shift(-HORIZON_PERIODS)
+    print(f"Target NaN count before cleaning: {df['Target'].isna().sum()}")
+
+    if 'Target' not in df.columns or df['Target'].isna().all():
+        raise ValueError(f"Failed to create target column. Close shape: {df['Close'].shape}, NaN in Close: {df['Close'].isna().sum()}")
 
     # Индикаторы
     df['RSI'] = compute_rsi(df['Close'])
@@ -93,10 +98,6 @@ def prepare_data():
     df['PriceChange'] = df['Close'].pct_change()
     df = df[df['PriceChange'].abs() < 0.1]
 
-    df['Target'] = df['Close'].shift(-HORIZON_PERIODS)
-    if 'Target' not in df.columns or df['Target'].isna().all():
-        raise ValueError("Failed to create target column.")
-
     initial_rows = len(df)
     df = df.dropna()
     print(f"After dropping NaNs: {len(df)} rows (dropped {initial_rows - len(df)})")
@@ -107,7 +108,7 @@ def prepare_data():
     X = df[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MA20', 'BB_Up', 'BB_Low', 'Lag1', 'MACD', 'MACD_Sig', 'Hour', 'DayOfWeek']].copy()
     y = (df['Target'] > df['Close']).astype(int)
 
-    # Проверка на inf и большие значения
+    # Проверка на inf и NaN
     X = X.replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(method='bfill')
     if X.isna().any().any():
         raise ValueError("NaN values remain in X after cleaning.")
