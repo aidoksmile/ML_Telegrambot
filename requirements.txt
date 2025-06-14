@@ -9,3 +9,4 @@ beautifulsoup4==4.13.4
 lightgbm==4.5.0
 pandas==2.3.0
 numpy==2.3.0
+optuna
