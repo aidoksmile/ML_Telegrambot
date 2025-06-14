@@ -1,7 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from lightgbm import LGBMClassifier
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.metrics import accuracy_score
 import joblib
@@ -19,19 +19,34 @@ MODEL_PATH = "model.pkl"
 ACCURACY_PATH = "accuracy.json"
 
 # Параметры стратегии
-HORIZON_DAYS = 1  # Прогноз на 1 день вперед (~96 свечей по 15 мин)
-LOOKBACK_PERIOD = "60d"  # История для обучения — 60 дней
-MIN_DATA_ROWS = 100  # Минимальное количество строк для обучения
-TARGET_ACCURACY = 0.8  # Целевая точность
-MAX_RETRAIN_ATTEMPTS = 3  # Максимальное количество попыток перетренировки (уменьшено для скорости)
-MIN_ACCURACY_FOR_SIGNAL = 0.5  # Минимальная точность для генерации сигнала
+HORIZON_DAYS = 1
+LOOKBACK_PERIOD = "60d"
+MIN_DATA_ROWS = 100
+TARGET_ACCURACY = 0.8
+MAX_RETRAIN_ATTEMPTS = 3
+MIN_ACCURACY_FOR_SIGNAL = 0.5
+
+def compute_rsi(data, periods=14):
+    delta = data.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=periods).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=periods).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def compute_bollinger_bands(data, window=20, num_std=2):
+    ma = data.rolling(window=window).mean()
+    std = data.rolling(window=window).std()
+    upper = ma + (std * num_std)
+    lower = ma - (std * num_std)
+    return upper, lower
 
 def prepare_data():
     print("Загрузка данных из Yahoo Finance...")
     try:
         end_date = datetime.now()
-        if end_date.weekday() >= 5:  # Saturday (5) or Sunday (6)
-            end_date -= timedelta(days=end_date.weekday() - 4)  # Go to last Friday
+        if end_date.weekday() >= 5:
+            end_date -= timedelta(days=end_date.weekday() - 4)
         df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         raise ValueError(f"Ошибка при загрузке данных из Yahoo Finance: {str(e)}")
@@ -60,6 +75,12 @@ def prepare_data():
         print("Warning: Обнаружены пропущенные значения в столбце 'Close'. Заполняем их.")
         df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
 
+    # Добавляем индикаторы
+    df['RSI'] = compute_rsi(df['Close'])
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['BB_Upper'], df['BB_Lower'] = compute_bollinger_bands(df['Close'])
+    df['Lag1'] = df['Close'].shift(1)  # Лаг цены на 1 шаг
+
     try:
         df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))
     except Exception as e:
@@ -71,21 +92,21 @@ def prepare_data():
     if df['target'].isna().all():
         raise ValueError("Столбец 'target' содержит только NaN значения, возможно из-за недостатка данных.")
 
-    print("Target column sample:\n", df[['Close', 'target']].head())
+    print("Target column sample:\n", df[['Close', 'target', 'RSI', 'MA20', 'BB_Upper', 'BB_Lower']].head())
     print("Target NaN count:", df['target'].isna().sum())
 
     initial_rows = len(df)
-    df = df.dropna(subset=['target'])
-    print(f"After dropping NaN target rows: {len(df)} (removed {initial_rows - len(df)} rows)")
+    df = df.dropna()
+    print(f"After dropping NaN rows: {len(df)} (removed {initial_rows - len(df)} rows)")
 
     if df.empty or len(df) == 0:
-        raise ValueError("DataFrame пуст после удаления строк с NaN в 'target'.")
+        raise ValueError("DataFrame пуст после удаления строк с NaN.")
 
     if len(df) < MIN_DATA_ROWS:
         raise ValueError(f"Недостаточно данных для обучения модели. Available rows: {len(df)}, required: {MIN_DATA_ROWS}")
 
     try:
-        X = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+        X = df[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MA20', 'BB_Upper', 'BB_Lower', 'Lag1']].copy()
         y = (df['target'] > df['Close']).astype(int)
     except Exception as e:
         raise ValueError(f"Ошибка при создании X или y: {str(e)}. Проверьте выравнивание 'target' и 'Close'.")
@@ -107,12 +128,11 @@ def train_model():
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-    # Define hyperparameter grid for RandomizedSearchCV
     param_dist = {
-        'n_estimators': [50, 100, 200],
-        'max_depth': [None, 10, 20],
-        'min_samples_split': [2, 5],
-        'min_samples_leaf': [1, 2]
+        'n_estimators': [50, 100],
+        'max_depth': [3, 6],
+        'learning_rate': [0.01, 0.1],
+        'subsample': [0.7, 1.0]
     }
 
     best_acc = 0.0
@@ -123,10 +143,10 @@ def train_model():
         print(f"Попытка обучения модели #{attempt}...")
         start_time = time.time()
         try:
-            model = RandomForestClassifier(random_state=42)
-            # Use RandomizedSearchCV for faster search
-            search = RandomizedSearchCV(model, param_distributions=param_dist, n_iter=10, cv=3, 
+            model = LGBMClassifier(random_state=42)
+            search = RandomizedSearchCV(model, param_distributions=param_dist, n_iter=6, cv=3, 
                                        scoring='accuracy', n_jobs=-1, random_state=42)
+            print(f"Размеры обучающих данных: X_train = {X_train.shape}, y_train = {y_train.shape}")
             search.fit(X_train, y_train)
             
             best_model = search.best_estimator_
@@ -160,40 +180,39 @@ def train_model():
         print(f"Точность {best_acc:.2f} ниже минимальной ({MIN_ACCURACY_FOR_SIGNAL}). Сигнал не будет сгенерирован.")
         return
 
-    # Save the best model
     joblib.dump(best_model, MODEL_PATH)
-
-    # Save accuracy and training info
     with open(ACCURACY_PATH, "w") as f:
         json.dump({"accuracy": best_acc, "last_trained": str(datetime.now()), 
                    "best_params": search.best_params_ if best_model else {}}, f)
 
-    # Generate signal with the best model
     generate_signal(best_model, X.iloc[-1:], X.index[-1])
 
 def generate_signal(model, latest_data, last_index):
-    prediction = model.predict(latest_data)[0]
-    current_price = latest_data['Close'].iloc[0]
-    stop_loss = current_price * (0.99 if prediction == 1 else 1.01)
-    take_profit = current_price * (1.015 if prediction == 1 else 0.985)
+    try:
+        prediction = model.predict(latest_data)[0]
+        current_price = latest_data['Close'].iloc[0]
+        stop_loss = current_price * (0.99 if prediction == 1 else 1.01)
+        take_profit = current_price * (1.015 if prediction == 1 else 0.985)
 
-    signal = {
-        "time": str(datetime.now()),
-        "price": round(current_price, 5),
-        "signal": "BUY" if prediction == 1 else "SELL",
-        "stop_loss": round(stop_loss, 5),
-        "take_profit": round(take_profit, 5),
-    }
+        signal = {
+            "time": str(datetime.now()),
+            "price": round(current_price, 5),
+            "signal": "BUY" if prediction == 1 else "SELL",
+            "stop_loss": round(stop_loss, 5),
+            "take_profit": round(take_profit, 5),
+        }
 
-    msg = (
-        f"📊 Signal: {signal['signal']}\n"
-        f"🕒 Time: {signal['time']}\n"
-        f"💰 Price: {signal['price']}\n"
-        f"📉 Stop Loss: {signal['stop_loss']}\n"
-        f"📈 Take Profit: {signal['take_profit']}"
-    )
-    print(f"Генерация сигнала: {msg}")
-    send_telegram_message(msg)
+        msg = (
+            f"📊 Signal: {signal['signal']}\n"
+            f"🕒 Time: {signal['time']}\n"
+            f"💰 Price: {signal['price']}\n"
+            f"📉 Stop Loss: {signal['stop_loss']}\n"
+            f"📈 Take Profit: {signal['take_profit']}"
+        )
+        print(f"Генерация сигнала: {msg}")
+        send_telegram_message(msg)
+    except Exception as e:
+        print(f"Ошибка при генерации сигнала: {str(e)}")
 
 @app.get("/")
 async def root():
