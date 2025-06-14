@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.metrics import accuracy_score
 import joblib
 import os
@@ -11,6 +11,7 @@ from fastapi import FastAPI
 import uvicorn
 from datetime import datetime, timedelta
 from send_telegram import send_telegram_message
+import time
 
 app = FastAPI()
 
@@ -22,12 +23,12 @@ HORIZON_DAYS = 1  # Прогноз на 1 день вперед (~96 свече�
 LOOKBACK_PERIOD = "60d"  # История для обучения — 60 дней
 MIN_DATA_ROWS = 100  # Минимальное количество строк для обучения
 TARGET_ACCURACY = 0.8  # Целевая точность
-MAX_RETRAIN_ATTEMPTS = 5  # Максимальное количество попыток перетренировки
+MAX_RETRAIN_ATTEMPTS = 3  # Максимальное количество попыток перетренировки (уменьшено для скорости)
+MIN_ACCURACY_FOR_SIGNAL = 0.5  # Минимальная точность для генерации сигнала
 
 def prepare_data():
     print("Загрузка данных из Yahoo Finance...")
     try:
-        # Set end_date to last Friday to avoid weekend data gaps
         end_date = datetime.now()
         if end_date.weekday() >= 5:  # Saturday (5) or Sunday (6)
             end_date -= timedelta(days=end_date.weekday() - 4)  # Go to last Friday
@@ -41,7 +42,6 @@ def prepare_data():
     print(f"Downloaded {len(df)} rows.")
     print("Column structure:\n", df.columns)
 
-    # Handle multi-index columns
     if isinstance(df.columns, pd.MultiIndex):
         print("Multi-index columns detected. Flattening to single-level columns.")
         df.columns = [col[0] for col in df.columns]
@@ -107,8 +107,8 @@ def train_model():
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-    # Define hyperparameter grid for RandomForestClassifier
-    param_grid = {
+    # Define hyperparameter grid for RandomizedSearchCV
+    param_dist = {
         'n_estimators': [50, 100, 200],
         'max_depth': [None, 10, 20],
         'min_samples_split': [2, 5],
@@ -121,36 +121,52 @@ def train_model():
 
     while best_acc < TARGET_ACCURACY and attempt <= MAX_RETRAIN_ATTEMPTS:
         print(f"Попытка обучения модели #{attempt}...")
-        model = RandomForestClassifier(random_state=42)
-        grid_search = GridSearchCV(model, param_grid, cv=3, scoring='accuracy', n_jobs=-1)
-        grid_search.fit(X_train, y_train)
+        start_time = time.time()
+        try:
+            model = RandomForestClassifier(random_state=42)
+            # Use RandomizedSearchCV for faster search
+            search = RandomizedSearchCV(model, param_distributions=param_dist, n_iter=10, cv=3, 
+                                       scoring='accuracy', n_jobs=-1, random_state=42)
+            search.fit(X_train, y_train)
+            
+            best_model = search.best_estimator_
+            preds = best_model.predict(X_test)
+            acc = accuracy_score(y_test, preds)
+            elapsed_time = time.time() - start_time
+            print(f"Попытка #{attempt} - Лучшая точность: {acc:.2f}, "
+                  f"Лучшие параметры: {search.best_params_}, Время: {elapsed_time:.2f} сек")
 
-        # Get the best model and its accuracy
-        best_model = grid_search.best_estimator_
-        preds = best_model.predict(X_test)
-        acc = accuracy_score(y_test, preds)
-        print(f"Попытка #{attempt} - Лучшая точность: {acc:.2f}, Лучшие параметры: {grid_search.best_params_}")
+            if acc > best_acc:
+                best_acc = acc
+                best_model = search.best_estimator_
 
-        if acc > best_acc:
-            best_acc = acc
-            best_model = grid_search.best_estimator_
+            if best_acc >= TARGET_ACCURACY:
+                print(f"Достигнута целевая точность {best_acc:.2f}. Сохраняем модель.")
+                break
 
-        if best_acc >= TARGET_ACCURACY:
-            print(f"Достигнута целевая точность {best_acc:.2f}. Сохраняем модель.")
-            break
+        except Exception as e:
+            print(f"Ошибка в попытке #{attempt}: {str(e)}")
+            attempt += 1
+            continue
 
         attempt += 1
         print(f"Точность {best_acc:.2f} ниже целевой ({TARGET_ACCURACY}). Пробуем снова...")
 
     if best_acc < TARGET_ACCURACY:
-        print(f"Не удалось достичь целевой точности {TARGET_ACCURACY} после {MAX_RETRAIN_ATTEMPTS} попыток. Используем лучшую модель с точностью {best_acc:.2f}.")
+        print(f"Не удалось достичь целевой точности {TARGET_ACCURACY} после {MAX_RETRAIN_ATTEMPTS} попыток. "
+              f"Лучшая точность: {best_acc:.2f}.")
+
+    if best_acc < MIN_ACCURACY_FOR_SIGNAL:
+        print(f"Точность {best_acc:.2f} ниже минимальной ({MIN_ACCURACY_FOR_SIGNAL}). Сигнал не будет сгенерирован.")
+        return
 
     # Save the best model
     joblib.dump(best_model, MODEL_PATH)
 
     # Save accuracy and training info
     with open(ACCURACY_PATH, "w") as f:
-        json.dump({"accuracy": best_acc, "last_trained": str(datetime.now()), "best_params": grid_search.best_params_}, f)
+        json.dump({"accuracy": best_acc, "last_trained": str(datetime.now()), 
+                   "best_params": search.best_params_ if best_model else {}}, f)
 
     # Generate signal with the best model
     generate_signal(best_model, X.iloc[-1:], X.index[-1])
@@ -176,6 +192,7 @@ def generate_signal(model, latest_data, last_index):
         f"📉 Stop Loss: {signal['stop_loss']}\n"
         f"📈 Take Profit: {signal['take_profit']}"
     )
+    print(f"Генерация сигнала: {msg}")
     send_telegram_message(msg)
 
 @app.get("/")
