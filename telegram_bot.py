@@ -1,7 +1,7 @@
 from telegram import Bot
 
-TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
+TOKEN = "8132037717:AAHK04i4cHkgqH-Qyiy7OHs73xbXmvqnlpc"
+CHAT_ID = "106240757"
 
 def send_signal(signal):
     text = f'''
