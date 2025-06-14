@@ -34,9 +34,9 @@ def prepare_data():
     print(f"Downloaded {len(df)} rows.")
     df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Прогноз на 1 день вперёд
 
-    # Явно выровняй колонки
+    # Явно выровняй колонки по индексам
     df['target'], df['Close'] = df['target'].align(df['Close'], axis=0, fill_value=np.nan)
-    
+
     df.dropna(inplace=True)
     print(f"After dropna: {len(df)}")
 
