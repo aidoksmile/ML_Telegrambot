@@ -2,7 +2,7 @@ import os
 import logging
 import time
 import schedule
-from telegram.ext import Updater, CommandHandler, Dispatcher
+from telegram.ext import Updater, CommandHandler
 from server import send_message, start_server
 from strategy import generate_signals
 from queue import Queue
@@ -24,10 +24,10 @@ if ':' not in TELEGRAM_BOT_TOKEN or len(TELEGRAM_BOT_TOKEN) < 10:
     logging.error("Некорректный формат TELEGRAM_BOT_TOKEN")
     raise ValueError("Некорректный формат TELEGRAM_BOT_TOKEN")
 
-def signal_command(update, context):
+def signal_command(bot, update):
     """Обработчик команды /signal."""
     logging.debug("Получена команда /signal")
-    update.message.reply_text("⏳ Генерация сигналов...")
+    bot.send_message(chat_id=update.message.chat_id, text="⏳ Генерация сигналов...")
     generate_signals()
 
 def main():
@@ -38,15 +38,10 @@ def main():
         # Проверка токена
         logging.info(f"Проверка токена: {TELEGRAM_BOT_TOKEN[:10]}...")  # Обрезаем для безопасности
 
-        # Инициализация Dispatcher
-        logging.info("Инициализация Dispatcher...")
-        dp = Dispatcher(update_queue, None)
-
         # Запуск Telegram-бота
         logging.info("Инициализация Telegram-бота...")
         updater = Updater(TELEGRAM_BOT_TOKEN, update_queue=update_queue)
-        dp.add_handler(CommandHandler("signal", signal_command))
-        updater.dispatcher = dp  # Привязываем Dispatcher к Updater вручную
+        updater.dispatcher.add_handler(CommandHandler("signal", signal_command))
         updater.start_polling()
         logging.info("Telegram-бот запущен")
 
