@@ -20,18 +20,18 @@ MODEL_PATH = "model.pkl"
 ACCURACY_PATH = "accuracy.json"
 
 # Параметры стратегии
-HORIZON_PERIODS = 1  # 1 день вперед
-LOOKBACK_PERIOD = "max"  # Максимальный период данных
+HORIZON_PERIODS = 1
+LOOKBACK_PERIOD = "max"
 MIN_DATA_ROWS = 100
 TARGET_ACCURACY = 0.8
 MIN_ACCURACY_FOR_SIGNAL = 0.5
-MAX_TRAINING_TIME = 3600  # 1 час
+MAX_TRAINING_TIME = 3600
 
 def compute_rsi(data, periods=14):
     delta = data.diff()
     gain = delta.where(delta > 0, 0).rolling(window=periods).mean()
     loss = -delta.where(delta < 0, 0).rolling(window=periods).mean()
-    rs = gain / (loss + 1e-10)  # Избегаем деления на ноль
+    rs = gain / (loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
@@ -53,39 +53,30 @@ def prepare_data():
     print("Downloading data...")
     try:
         end_date = datetime.now()
-        if end_date.weekday() >= 5:
-            end_date -= timedelta(days=end_date.weekday() - 4)
-        df = yf.download("EURUSD=X", interval="1d", period=LOOKBACK_PERIOD, end=end_date, auto_adjust=False)
+        while end_date.weekday() >= 5:  # суббота или воскресенье
+            end_date -= timedelta(days=1)
+
+        df = yf.download("EURUSD=X", interval="1d", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         raise ValueError(f"Error downloading data: {str(e)}")
 
     if df.empty:
-        raise ValueError("Empty data received.")
+        raise ValueError("Empty data received from Yahoo Finance.")
 
-    print(f"Downloaded {len(df)} rows, start date: {df.index[0]}")
-
+    print(f"Downloaded {len(df)} rows, from {df.index[0]} to {df.index[-1]}")
+    
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
 
-    required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-    missing_cols = [col for col in required_columns if col not in df.columns]
-    if missing_cols:
-        raise ValueError(f"Missing columns: {missing_cols}")
+    df = df[(df['Close'] > 0) & (df['Open'] > 0)]
+    print(f"After filtering Open/Close > 0: {len(df)} rows")
 
-    # Фильтрация аномалий
-    df = df[(df['Close'] > 0) & (df['Open'] > 0) & (df['Volume'] > 0)]
-    if df['Close'].isna().any():
-        print("Filling NaN values in 'Close'...")
-        df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
-
-    # Создание Target до расчёта индикаторов
+    df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
     df['Target'] = df['Close'].shift(-HORIZON_PERIODS)
-    print(f"Target NaN count before cleaning: {df['Target'].isna().sum()}")
 
-    if 'Target' not in df.columns or df['Target'].isna().all():
-        raise ValueError(f"Failed to create target column. Close shape: {df['Close'].shape}, NaN in Close: {df['Close'].isna().sum()}")
+    if df['Target'].isna().all():
+        raise ValueError("Target column contains only NaNs.")
 
-    # Индикаторы
     df['RSI'] = compute_rsi(df['Close'])
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['BB_Up'], df['BB_Low'] = compute_bollinger_bands(df['Close'])
@@ -93,34 +84,27 @@ def prepare_data():
     df['MACD'], df['MACD_Sig'] = compute_macd(df['Close'])
     df['Hour'] = df.index.hour
     df['DayOfWeek'] = df.index.dayofweek
-
-    # Фильтрация волатильности
     df['PriceChange'] = df['Close'].pct_change()
     df = df[df['PriceChange'].abs() < 0.1]
 
     initial_rows = len(df)
     df = df.dropna()
-    print(f"After dropping NaNs: {len(df)} rows (dropped {initial_rows - len(df)})")
+    print(f"After dropna: {len(df)} rows (dropped {initial_rows - len(df)})")
 
     if len(df) < MIN_DATA_ROWS:
         raise ValueError(f"Insufficient data: {len(df)} rows, required {MIN_DATA_ROWS}")
 
-    X = df[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MA20', 'BB_Up', 'BB_Low', 'Lag1', 'MACD', 'MACD_Sig', 'Hour', 'DayOfWeek']].copy()
+    X = df[['Open', 'High', 'Low', 'Close', 'RSI', 'MA20', 'BB_Up', 'BB_Low',
+            'Lag1', 'MACD', 'MACD_Sig', 'Hour', 'DayOfWeek']]
     y = (df['Target'] > df['Close']).astype(int)
 
-    # Проверка на inf и NaN
     X = X.replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(method='bfill')
-    if X.isna().any().any():
-        raise ValueError("NaN values remain in X after cleaning.")
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    if np.any(np.isinf(X_scaled)) or np.any(np.isnan(X_scaled)):
-        raise ValueError("Scaler produced inf or NaN values.")
-
     X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
 
-    print(f"X shape: {X.shape}, y classes: {y.value_counts().to_dict()}")
+    print(f"X shape: {X.shape}, y distribution: {y.value_counts().to_dict()}")
     return X, y, scaler
 
 def train_model():
@@ -147,47 +131,42 @@ def train_model():
     start_training = time.time()
 
     while best_acc < TARGET_ACCURACY and (time.time() - start_training) < MAX_TRAINING_TIME:
-        print(f"Attempt #{attempt}...")
-        start_time = time.time()
+        print(f"Training attempt #{attempt}")
         try:
             model = LGBMClassifier(random_state=42, force_col_wise=True, verbose=-1)
-            search = RandomizedSearchCV(model, param_distributions=param_dist, n_iter=4, cv=3, 
-                                       scoring='accuracy', n_jobs=-1, random_state=42, verbose=0)
+            search = RandomizedSearchCV(model, param_distributions=param_dist, n_iter=4, cv=3,
+                                        scoring='accuracy', n_jobs=-1, random_state=42, verbose=0)
             search.fit(X_train, y_train)
-            
+
             best_model = search.best_estimator_
             preds = best_model.predict(X_test)
             acc = accuracy_score(y_test, preds)
-            elapsed_time = time.time() - start_time
-            print(f"Accuracy: {acc:.2f}, params: {search.best_params_}, time: {elapsed_time:.2f} sec")
+            print(f"Accuracy: {acc:.2f}, best params: {search.best_params_}")
 
             if acc > best_acc:
                 best_acc = acc
                 best_model = search.best_estimator_
 
             if best_acc >= TARGET_ACCURACY:
-                print(f"Target accuracy {best_acc:.2f} reached. Saving model.")
+                print(f"Reached target accuracy: {best_acc:.2f}")
                 break
 
         except Exception as e:
-            print(f"Error in attempt #{attempt}: {str(e)}")
-            attempt += 1
-            continue
+            print(f"Training error on attempt {attempt}: {e}")
 
         attempt += 1
-        print(f"Accuracy {best_acc:.2f} below target ({TARGET_ACCURACY}). Retrying...")
-
-    if (time.time() - start_training) >= MAX_TRAINING_TIME:
-        print(f"Training timed out after {MAX_TRAINING_TIME} seconds.")
 
     if best_acc < MIN_ACCURACY_FOR_SIGNAL:
-        print(f"Accuracy {best_acc:.2f} below minimum ({MIN_ACCURACY_FOR_SIGNAL}). No signal generated.")
+        print(f"Accuracy {best_acc:.2f} too low. No model saved.")
         return
 
     joblib.dump({'model': best_model, 'scaler': scaler}, MODEL_PATH)
     with open(ACCURACY_PATH, "w") as f:
-        json.dump({"accuracy": best_acc, "last_trained": str(datetime.now()), 
-                   "best_params": search.best_params_ if best_model else {}}, f)
+        json.dump({
+            "accuracy": best_acc,
+            "last_trained": str(datetime.now()),
+            "best_params": search.best_params_ if best_model else {}
+        }, f)
 
     generate_signal(best_model, scaler, X.iloc[-1:], X.index[-1])
 
@@ -215,10 +194,10 @@ def generate_signal(model, scaler, latest_data, last_index):
             f"📉 Stop Loss: {signal['stop_loss']}\n"
             f"📈 Take Profit: {signal['take_profit']}"
         )
-        print(f"Signal generated: {msg}")
+        print(f"Signal generated:\n{msg}")
         send_telegram_message(msg)
     except Exception as e:
-        print(f"Error generating signal: {str(e)}")
+        print(f"Signal generation error: {e}")
 
 @app.get("/")
 async def root():
