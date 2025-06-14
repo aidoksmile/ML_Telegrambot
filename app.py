@@ -27,14 +27,18 @@ MIN_DATA_ROWS = 100  # Минимальное количество строк д
 def prepare_data():
     print("Загрузка данных из Yahoo Finance...")
     try:
-        # Ensure data is from active market days (exclude weekends)
-        end_date = datetime.now() - timedelta(days=1)  # Use last Friday to avoid weekend data gaps
+        # Set end_date to last Friday to avoid weekend data gaps
+        end_date = datetime.now()
+        # If today is Saturday (5) or Sunday (6), adjust to last Friday
+        if end_date.weekday() >= 5:
+            end_date -= timedelta(days=end_date.weekday() - 4)  # Go to last Friday
         df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         raise ValueError(f"Ошибка при загрузке данных из Yahoo Finance: {str(e)}")
 
-    if df.empty:
-        raise ValueError("Данные из Yahoo Finance пусты.")
+    # Check if DataFrame is empty
+    if df.empty or len(df) == 0:
+        raise ValueError("Данные из Yahoo Finance пусты или не содержат строк.")
 
     print(f"Downloaded {len(df)} rows.")
 
@@ -43,6 +47,10 @@ def prepare_data():
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
         raise ValueError(f"Отсутствуют необходимые столбцы: {missing_columns}")
+
+    # Debug: Print initial data state
+    print("Initial data sample:\n", df.head())
+    print("Missing values:\n", df.isna().sum())
 
     # Check for missing values in 'Close' column
     if df['Close'].isna().all():
@@ -54,7 +62,7 @@ def prepare_data():
     # Create target column
     df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Forecast 1 day ahead (~96 15-min candles)
 
-    # Check if 'target' column was created successfully
+    # Check if 'target' column was created
     if 'target' not in df.columns:
         raise ValueError("Не удалось создать столбец 'target'.")
 
@@ -62,26 +70,36 @@ def prepare_data():
     if df['target'].isna().all():
         raise ValueError("Столбец 'target' содержит только NaN значения, возможно из-за недостатка данных.")
 
+    # Debug: Print target column state
+    print("Target column sample:\n", df[['Close', 'target']].head())
+    print("Target NaN count:", df['target'].isna().sum())
+
     # Drop rows where 'target' is NaN
     initial_rows = len(df)
     df = df.dropna(subset=['target'])
     print(f"After dropping NaN target rows: {len(df)} (removed {initial_rows - len(df)} rows)")
+
+    # Check if DataFrame is empty after dropping NaNs
+    if df.empty or len(df) == 0:
+        raise ValueError("DataFrame пуст после удаления строк с NaN в 'target'.")
 
     if len(df) < MIN_DATA_ROWS:
         raise ValueError(f"Недостаточно данных для обучения модели. Available rows: {len(df)}, required: {MIN_DATA_ROWS}")
 
     # Prepare features and target
     X = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-    y = (df['target'] > df['Close']).astype(int)  # 1 for rise, 0 for fall
+    try:
+        y = (df['target'] > df['Close']).astype(int)  # 1 for rise, 0 for fall
+    except Exception as e:
+        raise ValueError(f"Ошибка при создании y: {str(e)}. Проверьте выравнивание 'target' и 'Close'.")
 
     # Verify alignment of X and y
     if len(X) != len(y):
         raise ValueError(f"X и y не выровнены: X имеет {len(X)} строк, y имеет {len(y)} строк")
 
-    # Debugging: Print sample data to verify
-    print("Sample data:")
-    print(df[['Close', 'target']].head())
-    print("Target value counts:", y.value_counts().to_dict())
+    # Debug: Print final data state
+    print("Final X shape:", X.shape)
+    print("Final y value counts:", y.value_counts().to_dict())
 
     return X, y
 
