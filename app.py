@@ -32,9 +32,9 @@ def prepare_data():
         raise ValueError("Не удалось загрузить данные из Yahoo Finance.")
 
     print(f"Downloaded {len(df)} rows.")
-    df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Прогноз на 1 день вперед
+    df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Прогноз на 1 день вперёд
 
-    # Явное выравнивание колонок
+    # Явно выровняй колонки
     df['target'], df['Close'] = df['target'].align(df['Close'], axis=0, fill_value=np.nan)
     
     df.dropna(inplace=True)
