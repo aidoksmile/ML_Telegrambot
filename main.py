@@ -2,7 +2,7 @@ import os
 import logging
 import time
 import schedule
-from telegram.ext import Updater, CommandHandler
+from telegram.ext import Updater, CommandHandler, Dispatcher
 from server import send_message, start_server
 from strategy import generate_signals
 from queue import Queue
@@ -38,10 +38,15 @@ def main():
         # Проверка токена
         logging.info(f"Проверка токена: {TELEGRAM_BOT_TOKEN[:10]}...")  # Обрезаем для безопасности
 
+        # Инициализация Dispatcher
+        logging.info("Инициализация Dispatcher...")
+        dp = Dispatcher(update_queue, None)
+
         # Запуск Telegram-бота
         logging.info("Инициализация Telegram-бота...")
         updater = Updater(TELEGRAM_BOT_TOKEN, update_queue=update_queue)
-        updater.dispatcher.add_handler(CommandHandler("signal", signal_command))
+        dp.add_handler(CommandHandler("signal", signal_command))
+        updater.dispatcher = dp  # Привязываем Dispatcher к Updater вручную
         updater.start_polling()
         logging.info("Telegram-бот запущен")
 
@@ -68,8 +73,8 @@ def main():
         logging.critical(f"Критическая ошибка бота: {e}", exc_info=True)
         send_message(f"❌ Критическая ошибка бота: {e}")
     finally:
-        if updater:
-            updater.stop()
+        # Убрано updater.stop() из-за асинхронности
+        pass
 
 if __name__ == "__main__":
     main()
