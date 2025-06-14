@@ -19,6 +19,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     logging.error("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
     raise ValueError("Отсутствуют необходимые переменные окружения")
+if ':' not in TELEGRAM_BOT_TOKEN or len(TELEGRAM_BOT_TOKEN) < 10:
+    logging.error("Некорректный формат TELEGRAM_BOT_TOKEN")
+    raise ValueError("Некорректный формат TELEGRAM_BOT_TOKEN")
 
 def signal_command(update, context):
     """Обработчик команды /signal."""
@@ -28,11 +31,10 @@ def signal_command(update, context):
 
 def main():
     """Главная функция."""
+    updater = None
     try:
         # Проверка токена
         logging.info(f"Проверка токена: {TELEGRAM_BOT_TOKEN[:10]}...")  # Обрезаем для безопасности
-        if not TELEGRAM_BOT_TOKEN.startswith("1234567890:"):  # Простая проверка формата
-            raise ValueError("Некорректный формат TELEGRAM_BOT_TOKEN")
 
         # Запуск Telegram-бота
         logging.info("Инициализация Telegram-бота...")
@@ -64,7 +66,7 @@ def main():
         logging.critical(f"Критическая ошибка бота: {e}", exc_info=True)
         send_message(f"❌ Критическая ошибка бота: {e}")
     finally:
-        if 'updater' in locals():
+        if updater:
             updater.stop()
 
 if __name__ == "__main__":
