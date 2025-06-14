@@ -1,10 +1,14 @@
 import os
 import logging
-import aiohttp
-from aiohttp import web
+import requests
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Настройка логирования
-logging.basicConfig(filename="bot.log", level=logging.INFO, format="%(asctime)s - %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
+)
 
 # Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -13,27 +17,36 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     logging.error("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
     raise ValueError("Отсутствуют необходимые переменные окружения")
 
-async def send_message(message):
+def send_message(message):
     """Отправляет сообщение в Telegram."""
-    async with aiohttp.ClientSession() as session:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-        async with session.post(url, json=payload) as response:
-            if response.status != 200:
-                logging.error(f"Ошибка Telegram: {await response.text()}")
-            else:
-                logging.info(f"Сообщение отправлено: {message}")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+    try:
+        response = requests.post(url, json=payload)
+        if response.status_code != 200:
+            logging.error(f"Ошибка Telegram: {response.text}")
+        else:
+            logging.info(f"Сообщение отправлено: {message}")
+    except Exception as e:
+        logging.error(f"Ошибка отправки сообщения: {e}")
 
-async def health_check(request):
-    """Проверка работоспособности для Render."""
-    return web.Response(text="Bot is running")
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+        logging.info("Получен GET-запрос на /")
 
-async def start_server():
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        logging.info("Получен HEAD-запрос на /")
+
+def start_server():
     """Запускает HTTP-сервер."""
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 10000)
-    await site.start()
-    logging.info("HTTP-сервер запущен")
+    server_address = ('0.0.0.0', 10000)
+    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+    logging.info("HTTP-сервер запущен на порту 10000")
+    httpd.serve_forever()
