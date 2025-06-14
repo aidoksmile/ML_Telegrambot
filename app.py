@@ -1,16 +1,15 @@
-from flask import Flask
-from telegram_bot import send_signal
+from flask import Flask, jsonify
 from predictor import generate_signals
 
 app = Flask(__name__)
 
-@app.route('/')
+@app.route("/", methods=["GET"])
 def home():
-    signal = generate_signals()
-    if signal:
-        send_signal(signal)
-        return f"Signal sent: {signal}"
-    return "No signal"
+    try:
+        signal = generate_signals()
+        return jsonify(signal)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run()
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
