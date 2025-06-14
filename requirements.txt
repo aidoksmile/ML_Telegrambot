@@ -1,8 +1,7 @@
 flask
-scikit-learn
-joblib
-pandas
-numpy
 yfinance
+pandas
+scikit-learn
 ta
+joblib
 python-telegram-bot==13.15
