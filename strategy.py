@@ -7,7 +7,11 @@ from sklearn.metrics import accuracy_score
 from server import send_message
 
 # Настройка логирования
-logging.basicConfig(filename="bot.log", level=logging.INFO, format="%(asctime)s - %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
+)
 
 # Конфигурация
 ASSETS = ["XAUUSD", "EURUSD", "USDJPY"]
@@ -50,7 +54,7 @@ def train_model(X, y):
     logging.info(f"Точность модели для {X.name}: {accuracy * 100:.2f}%")
     return model
 
-async def process_asset(symbol):
+def process_asset(symbol):
     """Обрабатывает актив и генерирует сигнал."""
     try:
         df = fetch_data(symbol)
@@ -59,13 +63,13 @@ async def process_asset(symbol):
         model = train_model(X, y)
         latest = X.iloc[-1].values.reshape(1, -1)
         signal = "Покупка" if model.predict(latest)[0] == 1 else "Продажа"
-        await send_message(f"📈 Сигнал для {symbol}: {signal}")
+        send_message(f"📈 Сигнал для {symbol}: {signal}")
     except Exception as e:
         logging.error(f"Ошибка обработки {symbol}: {e}")
-        await send_message(f"❌ Ошибка обработки {symbol}: {e}")
+        send_message(f"❌ Ошибка обработки {symbol}: {e}")
 
-async def generate_signals():
+def generate_signals():
     """Генерирует сигналы для всех активов."""
     logging.info("Генерация сигналов")
     for symbol in ASSETS:
-        await process_asset(symbol)
+        process_asset(symbol)
