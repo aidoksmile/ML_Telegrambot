@@ -53,9 +53,8 @@ def prepare_data():
     print("Downloading data...")
     try:
         end_date = datetime.now()
-        while end_date.weekday() >= 5:  # суббота или воскресенье
+        while end_date.weekday() >= 5:
             end_date -= timedelta(days=1)
-
         df = yf.download("EURUSD=X", interval="1d", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         raise ValueError(f"Error downloading data: {str(e)}")
@@ -133,9 +132,9 @@ def train_model():
     while best_acc < TARGET_ACCURACY and (time.time() - start_training) < MAX_TRAINING_TIME:
         print(f"Training attempt #{attempt}")
         try:
-            model = LGBMClassifier(random_state=42, force_col_wise=True, verbose=-1)
+            model = LGBMClassifier(random_state=np.random.randint(0, 100000), force_col_wise=True, verbose=-1)
             search = RandomizedSearchCV(model, param_distributions=param_dist, n_iter=4, cv=3,
-                                        scoring='accuracy', n_jobs=-1, random_state=42, verbose=0)
+                                        scoring='accuracy', n_jobs=-1, random_state=np.random.randint(0, 100000), verbose=0)
             search.fit(X_train, y_train)
 
             best_model = search.best_estimator_
