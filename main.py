@@ -5,6 +5,7 @@ import schedule
 from telegram.ext import Updater, CommandHandler
 from server import send_message, start_server
 from strategy import generate_signals
+from queue import Queue
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,13 +33,14 @@ def signal_command(update, context):
 def main():
     """Главная функция."""
     updater = None
+    update_queue = Queue()
     try:
         # Проверка токена
         logging.info(f"Проверка токена: {TELEGRAM_BOT_TOKEN[:10]}...")  # Обрезаем для безопасности
 
         # Запуск Telegram-бота
         logging.info("Инициализация Telegram-бота...")
-        updater = Updater(TELEGRAM_BOT_TOKEN)  # Убрано use_context=True
+        updater = Updater(TELEGRAM_BOT_TOKEN, update_queue=update_queue)
         updater.dispatcher.add_handler(CommandHandler("signal", signal_command))
         updater.start_polling()
         logging.info("Telegram-бот запущен")
