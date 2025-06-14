@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from lightgbm import LGBMClassifier
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
 import joblib
@@ -13,6 +13,7 @@ import uvicorn
 from datetime import datetime, timedelta
 from send_telegram import send_telegram_message
 import time
+import optuna  # Новый импорт
 
 app = FastAPI()
 
@@ -115,56 +116,45 @@ def train_model():
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-    param_dist = {
-        'n_estimators': [50, 100],
-        'max_depth': [3, 6, 10],
-        'learning_rate': [0.01, 0.05],
-        'subsample': [0.7, 1.0],
-        'min_child_samples': [10, 20],
-        'min_gain_to_split': [0.0, 0.01]
-    }
+    def objective(trial):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 50, 150),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'min_child_samples': trial.suggest_int('min_child_samples', 10, 50),
+            'min_gain_to_split': trial.suggest_float('min_gain_to_split', 0.0, 0.1),
+        }
 
-    best_acc = 0.0
-    best_model = None
-    attempt = 1
-    start_training = time.time()
+        model = LGBMClassifier(**params, random_state=42, force_col_wise=True, verbose=-1)
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        acc = accuracy_score(y_test, preds)
+        return acc
 
-    while best_acc < TARGET_ACCURACY and (time.time() - start_training) < MAX_TRAINING_TIME:
-        print(f"Training attempt #{attempt}")
-        try:
-            model = LGBMClassifier(random_state=np.random.randint(0, 100000), force_col_wise=True, verbose=-1)
-            search = RandomizedSearchCV(model, param_distributions=param_dist, n_iter=4, cv=3,
-                                        scoring='accuracy', n_jobs=-1, random_state=np.random.randint(0, 100000), verbose=0)
-            search.fit(X_train, y_train)
+    print("🔍 Starting Optuna hyperparameter search...")
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, timeout=MAX_TRAINING_TIME)
 
-            best_model = search.best_estimator_
-            preds = best_model.predict(X_test)
-            acc = accuracy_score(y_test, preds)
-            print(f"Accuracy: {acc:.2f}, best params: {search.best_params_}")
+    best_params = study.best_params
+    best_acc = study.best_value
 
-            if acc > best_acc:
-                best_acc = acc
-                best_model = search.best_estimator_
-
-            if best_acc >= TARGET_ACCURACY:
-                print(f"Reached target accuracy: {best_acc:.2f}")
-                break
-
-        except Exception as e:
-            print(f"Training error on attempt {attempt}: {e}")
-
-        attempt += 1
+    print(f"✅ Optuna best accuracy: {best_acc:.4f}")
+    print(f"📋 Best params: {best_params}")
 
     if best_acc < MIN_ACCURACY_FOR_SIGNAL:
-        print(f"Accuracy {best_acc:.2f} too low. No model saved.")
+        print(f"❌ Accuracy {best_acc:.2f} too low. No model saved.")
         return
+
+    best_model = LGBMClassifier(**best_params, random_state=42, force_col_wise=True, verbose=-1)
+    best_model.fit(X_train, y_train)
 
     joblib.dump({'model': best_model, 'scaler': scaler}, MODEL_PATH)
     with open(ACCURACY_PATH, "w") as f:
         json.dump({
             "accuracy": best_acc,
             "last_trained": str(datetime.now()),
-            "best_params": search.best_params_ if best_model else {}
+            "best_params": best_params
         }, f)
 
     generate_signal(best_model, scaler, X.iloc[-1:], X.index[-1])
