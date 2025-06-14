@@ -1,6 +1,6 @@
 pandas
 scikit-learn
 yfinance
-aiohttp
-aiocron
-python-telegram-bot
+requests
+schedule
+python-telegram-bot==20.6  # Используем старую версию с синхронным API
