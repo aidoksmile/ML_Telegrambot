@@ -1,7 +1,7 @@
-flask
+fastapi
+uvicorn
 yfinance
-pandas
 scikit-learn
-ta
 joblib
-python-telegram-bot==13.15
+python-dotenv
+requests
