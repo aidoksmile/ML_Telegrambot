@@ -4,6 +4,7 @@ import numpy as np
 from lightgbm import LGBMClassifier
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import StandardScaler
 import joblib
 import os
 import json
@@ -19,14 +20,14 @@ MODEL_PATH = "model.pkl"
 ACCURACY_PATH = "accuracy.json"
 
 # Параметры стратегии
-HORIZON_DAYS = 1
+HORIZON_PERIODS = 48  # 4 часа (48 свечей по 5 минут)
 LOOKBACK_PERIOD = "60d"
 MIN_DATA_ROWS = 100
 TARGET_ACCURACY = 0.8
 MAX_RETRAIN_ATTEMPTS = 3
 MIN_ACCURACY_FOR_SIGNAL = 0.5
 
-def compute_rsi(data, periods=14):
+def compute_rsi(data, periods=20):
     delta = data.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=periods).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=periods).mean()
@@ -41,13 +42,20 @@ def compute_bollinger_bands(data, window=20, num_std=2):
     lower = ma - (std * num_std)
     return upper, lower
 
+def compute_macd(data, fast=18, slow=40, signal=12):
+    exp1 = data.ewm(span=fast, adjust=False).mean()
+    exp2 = data.ewm(span=slow, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd, signal_line
+
 def prepare_data():
     print("Загрузка данных из Yahoo Finance...")
     try:
         end_date = datetime.now()
         if end_date.weekday() >= 5:
             end_date -= timedelta(days=end_date.weekday() - 4)
-        df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
+        df = yf.download("EURUSD=X", interval="5m", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         raise ValueError(f"Ошибка при загрузке данных из Yahoo Finance: {str(e)}")
 
@@ -79,10 +87,19 @@ def prepare_data():
     df['RSI'] = compute_rsi(df['Close'])
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['BB_Upper'], df['BB_Lower'] = compute_bollinger_bands(df['Close'])
-    df['Lag1'] = df['Close'].shift(1)  # Лаг цены на 1 шаг
+    df['Lag1'] = df['Close'].shift(1)
+    df['MACD'], df['MACD_Signal'] = compute_macd(df['Close'])
+    
+    # Временные признаки
+    df['Hour'] = df.index.hour
+    df['DayOfWeek'] = df.index.dayofweek
+
+    # Фильтрация экстремальной волатильности
+    df['PriceChange'] = df['Close'].pct_change()
+    df = df[df['PriceChange'].abs() < 0.01]  # Удаляем изменения >1%
 
     try:
-        df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))
+        df['target'] = df['Close'].shift(-HORIZON_PERIODS)
     except Exception as e:
         raise ValueError(f"Ошибка при создании столбца 'target': {str(e)}")
 
@@ -92,7 +109,7 @@ def prepare_data():
     if df['target'].isna().all():
         raise ValueError("Столбец 'target' содержит только NaN значения, возможно из-за недостатка данных.")
 
-    print("Target column sample:\n", df[['Close', 'target', 'RSI', 'MA20', 'BB_Upper', 'BB_Lower']].head())
+    print("Target column sample:\n", df[['Close', 'target', 'RSI', 'MA20', 'BB_Upper', 'BB_Lower', 'MACD', 'MACD_Signal']].head())
     print("Target NaN count:", df['target'].isna().sum())
 
     initial_rows = len(df)
@@ -106,7 +123,7 @@ def prepare_data():
         raise ValueError(f"Недостаточно данных для обучения модели. Available rows: {len(df)}, required: {MIN_DATA_ROWS}")
 
     try:
-        X = df[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MA20', 'BB_Upper', 'BB_Lower', 'Lag1']].copy()
+        X = df[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MA20', 'BB_Upper', 'BB_Lower', 'Lag1', 'MACD', 'MACD_Signal', 'Hour', 'DayOfWeek']].copy()
         y = (df['target'] > df['Close']).astype(int)
     except Exception as e:
         raise ValueError(f"Ошибка при создании X или y: {str(e)}. Проверьте выравнивание 'target' и 'Close'.")
@@ -114,14 +131,19 @@ def prepare_data():
     if len(X) != len(y):
         raise ValueError(f"X и y не выровнены: X имеет {len(X)} строк, y имеет {len(y)} строк")
 
+    # Нормализация признаков
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+
     print("Final X shape:", X.shape)
     print("Final y value counts:", y.value_counts().to_dict())
 
-    return X, y
+    return X, y, scaler
 
 def train_model():
     try:
-        X, y = prepare_data()
+        X, y, scaler = prepare_data()
     except Exception as e:
         print(f"Ошибка подготовки данных: {e}")
         return
@@ -130,9 +152,11 @@ def train_model():
 
     param_dist = {
         'n_estimators': [50, 100],
-        'max_depth': [3, 6],
-        'learning_rate': [0.01, 0.1],
-        'subsample': [0.7, 1.0]
+        'max_depth': [3, 6, 10],
+        'learning_rate': [0.01, 0.05],
+        'subsample': [0.7, 1.0],
+        'min_child_samples': [10, 20],
+        'min_gain_to_split': [0.0, 0.01]
     }
 
     best_acc = 0.0
@@ -143,8 +167,8 @@ def train_model():
         print(f"Попытка обучения модели #{attempt}...")
         start_time = time.time()
         try:
-            model = LGBMClassifier(random_state=42)
-            search = RandomizedSearchCV(model, param_distributions=param_dist, n_iter=6, cv=3, 
+            model = LGBMClassifier(random_state=42, force_col_wise=True)
+            search = RandomizedSearchCV(model, param_distributions=param_dist, n_iter=4, cv=3, 
                                        scoring='accuracy', n_jobs=-1, random_state=42)
             print(f"Размеры обучающих данных: X_train = {X_train.shape}, y_train = {y_train.shape}")
             search.fit(X_train, y_train)
@@ -180,16 +204,18 @@ def train_model():
         print(f"Точность {best_acc:.2f} ниже минимальной ({MIN_ACCURACY_FOR_SIGNAL}). Сигнал не будет сгенерирован.")
         return
 
-    joblib.dump(best_model, MODEL_PATH)
+    joblib.dump({'model': best_model, 'scaler': scaler}, MODEL_PATH)
     with open(ACCURACY_PATH, "w") as f:
         json.dump({"accuracy": best_acc, "last_trained": str(datetime.now()), 
                    "best_params": search.best_params_ if best_model else {}}, f)
 
-    generate_signal(best_model, X.iloc[-1:], X.index[-1])
+    generate_signal(best_model, scaler, X.iloc[-1:], X.index[-1])
 
-def generate_signal(model, latest_data, last_index):
+def generate_signal(model, scaler, latest_data, last_index):
     try:
-        prediction = model.predict(latest_data)[0]
+        latest_data_scaled = scaler.transform(latest_data)
+        latest_data_scaled = pd.DataFrame(latest_data_scaled, columns=latest_data.columns, index=latest_data.index)
+        prediction = model.predict(latest_data_scaled)[0]
         current_price = latest_data['Close'].iloc[0]
         stop_loss = current_price * (0.99 if prediction == 1 else 1.01)
         take_profit = current_price * (1.015 if prediction == 1 else 0.985)
