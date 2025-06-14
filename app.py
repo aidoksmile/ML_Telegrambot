@@ -122,6 +122,15 @@ def train_model():
 
     tscv = TimeSeriesSplit(n_splits=CV_FOLDS)
 
+    initial_params = {
+        'n_estimators': 131,
+        'max_depth': 10,
+        'learning_rate': 0.08801373270230743,
+        'subsample': 0.6955968252605201,
+        'min_child_samples': 17,
+        'min_gain_to_split': 0.03986836820081445
+    }
+
     def objective(trial):
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 50, 150),
@@ -147,6 +156,7 @@ def train_model():
 
     print("🔍 Starting Optuna hyperparameter search with TimeSeriesSplit...")
     study = optuna.create_study(direction="maximize")
+    study.enqueue_trial(initial_params)  # Стартовые параметры
     study.optimize(objective, timeout=MAX_TRAINING_TIME)
 
     best_params = study.best_params
