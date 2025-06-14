@@ -1,8 +1,8 @@
-import asyncio
 import os
 import logging
-from telegram.ext import Application, CommandHandler
-import aiocron
+import time
+import schedule
+from telegram.ext import Updater, CommandHandler
 from server import send_message, start_server
 from strategy import generate_signals
 
@@ -10,7 +10,7 @@ from strategy import generate_signals
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]  # Вывод только в консоль
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
 )
 
 # Конфигурация
@@ -20,61 +20,52 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     logging.error("Отсутствуют TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
     raise ValueError("Отсутствуют необходимые переменные окружения")
 
-async def signal_command(update, context):
+def signal_command(update, context):
     """Обработчик команды /signal."""
     logging.debug("Получена команда /signal")
-    await update.message.reply_text("⏳ Генерация сигналов...")
-    await generate_signals()
+    update.message.reply_text("⏳ Генерация сигналов...")
+    generate_signals()
 
-async def run_bot():
-    """Запуск Telegram-бота."""
-    try:
-        logging.debug("Инициализация Telegram-бота")
-        app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        app.add_handler(CommandHandler("signal", signal_command))
-        await app.initialize()
-        logging.info("Telegram-бот инициализирован")
-        
-        logging.debug("Отправка тестового сообщения")
-        await send_message("✅ Бот запущен")
-
-        logging.debug("Запуск polling")
-        await app.run_polling(allowed_updates=[])  # Блокирует выполнение
-    except Exception as e:
-        logging.critical(f"Ошибка бота: {e}")
-        await send_message(f"❌ Критическая ошибка бота: {e}")
-
-async def run_server():
-    """Запуск HTTP-сервера в фоновом режиме."""
-    try:
-        logging.debug("Запуск HTTP-сервера")
-        await start_server()
-        logging.info("HTTP-сервер запущен")
-    except Exception as e:
-        logging.critical(f"Ошибка сервера: {e}")
-        await send_message(f"❌ Критическая ошибка сервера: {e}")
-
-async def run_scheduler():
-    """Настройка планировщика."""
-    logging.debug("Настройка планировщика")
-    aiocron.crontab('0 1 * * *', func=generate_signals, start=True)
-    logging.info("Планировщик запущен")
-
-async def main():
+def main():
     """Главная функция."""
     try:
-        # Запуск сервера и планировщика в фоновом режиме
-        server_task = asyncio.create_task(run_server())
-        scheduler_task = asyncio.create_task(run_scheduler())
+        # Проверка токена
+        logging.info(f"Проверка токена: {TELEGRAM_BOT_TOKEN[:10]}...")  # Обрезаем для безопасности
+        if not TELEGRAM_BOT_TOKEN.startswith("1234567890:"):  # Простая проверка формата
+            raise ValueError("Некорректный формат TELEGRAM_BOT_TOKEN")
 
-        # Запуск бота (блокирует выполнение)
-        await run_bot()
+        # Запуск Telegram-бота
+        logging.info("Инициализация Telegram-бота...")
+        updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+        updater.dispatcher.add_handler(CommandHandler("signal", signal_command))
+        updater.start_polling()
+        logging.info("Telegram-бот запущен")
 
-        # Ожидание завершения задач (не будет достигнуто из-за run_polling)
-        await asyncio.gather(server_task, scheduler_task)
+        # Тестовое сообщение
+        logging.info("Отправка тестового сообщения...")
+        send_message("✅ Бот запущен")
+
+        # Запуск HTTP-сервера
+        logging.info("Запуск HTTP-сервера...")
+        start_server()
+        logging.info("HTTP-сервер запущен")
+
+        # Планировщик: 01:00 UTC (6:00 +05)
+        logging.info("Запуск планировщика...")
+        schedule.every().day.at("01:00").do(generate_signals)
+        logging.info("Планировщик запущен")
+
+        # Бесконечный цикл
+        while True:
+            schedule.run_pending()
+            time.sleep(60)
+
     except Exception as e:
-        logging.critical(f"Критическая ошибка: {e}")
-        await send_message(f"❌ Критическая ошибка: {e}")
+        logging.critical(f"Критическая ошибка бота: {e}", exc_info=True)
+        send_message(f"❌ Критическая ошибка бота: {e}")
+    finally:
+        if 'updater' in locals():
+            updater.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
