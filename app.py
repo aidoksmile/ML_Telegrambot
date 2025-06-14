@@ -27,7 +27,9 @@ MIN_DATA_ROWS = 100  # Минимальное количество строк д
 def prepare_data():
     print("Загрузка данных из Yahoo Finance...")
     try:
-        df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD)
+        # Use end_date to avoid weekend data issues
+        end_date = datetime.now().date() - timedelta(days=1)  # Use last Friday
+        df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         raise ValueError(f"Ошибка при загрузке данных из Yahoo Finance: {str(e)}")
 
@@ -42,7 +44,7 @@ def prepare_data():
     if missing_columns:
         raise ValueError(f"Отсутствуют необходимые столбцы: {missing_columns}")
 
-    # Check for missing values in 'Close' column
+    # Check for missing values in 'Close'
     if df['Close'].isna().all():
         raise ValueError("Столбец 'Close' содержит только NaN значения.")
     if df['Close'].isna().any():
@@ -52,9 +54,11 @@ def prepare_data():
     # Create target column
     df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Forecast 1 day ahead (~96 15-min candles)
 
-    # Check if 'target' column was created successfully
+    # Check if 'target' column was created and contains valid data
     if 'target' not in df.columns:
         raise ValueError("Не удалось создать столбец 'target'.")
+    if df['target'].isna().all():
+        raise ValueError("Столбец 'target' содержит только NaN значения после shift.")
 
     # Drop rows where 'target' is NaN
     initial_rows = len(df)
