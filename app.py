@@ -29,8 +29,7 @@ def prepare_data():
     try:
         # Set end_date to last Friday to avoid weekend data gaps
         end_date = datetime.now()
-        # If today is Saturday (5) or Sunday (6), adjust to last Friday
-        if end_date.weekday() >= 5:
+        if end_date.weekday() >= 5:  # Saturday (5) or Sunday (6)
             end_date -= timedelta(days=end_date.weekday() - 4)  # Go to last Friday
         df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
@@ -41,6 +40,14 @@ def prepare_data():
         raise ValueError("Данные из Yahoo Finance пусты или не содержат строк.")
 
     print(f"Downloaded {len(df)} rows.")
+
+    # Debug: Print column structure
+    print("Column structure:\n", df.columns)
+
+    # Handle multi-index columns
+    if isinstance(df.columns, pd.MultiIndex):
+        print("Multi-index columns detected. Flattening to single-level columns.")
+        df.columns = [col[0] for col in df.columns]  # Keep only the first level (e.g., 'Close')
 
     # Check for required columns
     required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -60,7 +67,10 @@ def prepare_data():
         df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
 
     # Create target column
-    df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Forecast 1 day ahead (~96 15-min candles)
+    try:
+        df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Forecast 1 day ahead (~96 15-min candles)
+    except Exception as e:
+        raise ValueError(f"Ошибка при создании столбца 'target': {str(e)}")
 
     # Check if 'target' column was created
     if 'target' not in df.columns:
@@ -87,11 +97,11 @@ def prepare_data():
         raise ValueError(f"Недостаточно данных для обучения модели. Available rows: {len(df)}, required: {MIN_DATA_ROWS}")
 
     # Prepare features and target
-    X = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
     try:
+        X = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
         y = (df['target'] > df['Close']).astype(int)  # 1 for rise, 0 for fall
     except Exception as e:
-        raise ValueError(f"Ошибка при создании y: {str(e)}. Проверьте выравнивание 'target' и 'Close'.")
+        raise ValueError(f"Ошибка при создании X или y: {str(e)}. Проверьте выравнивание 'target' и 'Close'.")
 
     # Verify alignment of X and y
     if len(X) != len(y):
