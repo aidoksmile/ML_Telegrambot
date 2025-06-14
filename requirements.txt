@@ -1,6 +1,0 @@
-pandas
-scikit-learn
-yfinance
-requests
-schedule
-python-telegram-bot==20.6  # Убедимся, что версия осталась прежней
