@@ -32,21 +32,31 @@ def prepare_data():
         raise ValueError("Не удалось загрузить данные из Yahoo Finance.")
 
     print(f"Downloaded {len(df)} rows.")
-    df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Прогноз на 1 день вперёд
 
-    # Получаем общие индексы
-    common_idx = df.index.intersection(df['target'].dropna().index)
-    
-    # Фильтруем DataFrame только по тем строкам, где есть значения target
-    df_filtered = df.loc[common_idx].copy()
+    # Check for missing values and handle them
+    if df[['Open', 'High', 'Low', 'Close', 'Volume']].isna().any().any():
+        print("Warning: Missing values detected in data. Filling with forward fill.")
+        df = df.fillna(method='ffill').fillna(method='bfill')  # Forward and backward fill
 
-    print(f"After filtering: {len(df_filtered)}")
+    # Create target column (shift Close price for forecast horizon)
+    df['target'] = df['Close'].shift(-int(HORIZON_DAYS * 96))  # Forecast 1 day ahead (~96 15-min candles)
 
-    if len(df_filtered) < MIN_DATA_ROWS:
-        raise ValueError("Недостаточно данных для обучения модели.")
+    # Drop rows where target is NaN (due to shift)
+    df = df.dropna(subset=['target'])
 
-    X = df_filtered[['Open', 'High', 'Low', 'Close', 'Volume']]
-    y = (df_filtered['target'] > df_filtered['Close']).astype(int)  # 1 - рост, 0 - падение
+    print(f"After dropping NaN target rows: {len(df)}")
+
+    if len(df) < MIN_DATA_ROWS:
+        raise ValueError(f"Недостаточно данных для обучения модели. Available rows: {len(df)}")
+
+    # Ensure indices are aligned for features and target
+    X = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+    y = (df['target'] > df['Close']).astype(int)  # 1 for rise, 0 for fall
+
+    # Verify alignment of X and y
+    if len(X) != len(y):
+        raise ValueError(f"X and y are not aligned: X has {len(X)} rows, y has {len(y)} rows")
+
     return X, y
 
 def train_model():
