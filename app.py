@@ -224,7 +224,8 @@ async def root():
     else:
         with open(ACCURACY_PATH, "r") as f:
             data = json.load(f)
-        last_trained = datetime.fromisoformat(data["last_trained'])
+        # ИСПРАВЛЕНО: Изменено data["last_trained'] на data["last_trained"]
+        last_trained = datetime.fromisoformat(data["last_trained"])
         # Переобучаем модель, если прошло более 1 дня или точность ниже целевой
         if (datetime.now() - last_trained).days >= 1 or data["accuracy"] < TARGET_ACCURACY:
             print(f"Model needs retraining. Last trained: {last_trained}, Accuracy: {data['accuracy']:.2f}")
