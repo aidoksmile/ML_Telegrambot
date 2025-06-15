@@ -1,4 +1,5 @@
 import logging
+import os # <-- ДОБАВЛЕНО: Импорт модуля os
 
 # --- General Settings ---
 LOG_LEVEL = logging.INFO # Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
