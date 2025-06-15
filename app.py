@@ -1,7 +1,6 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from lightgbm import LGBMClassifier
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
@@ -11,11 +10,17 @@ import json
 from fastapi import FastAPI
 import uvicorn
 from datetime import datetime, timedelta
-from send_telegram import send_telegram_message
+from send_telegram import send_telegram_message # Убедитесь, что этот файл существует и настроен
 import time
 import optuna
 import logging
 import optuna.samplers
+from optuna.integration import TFKerasPruningCallback # Для прунинга Keras моделей
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras.callbacks import EarlyStopping
 
 import config
 
@@ -29,7 +34,7 @@ app = FastAPI()
 MODEL_PATH = config.MODEL_PATH
 ACCURACY_PATH = config.ACCURACY_PATH
 HORIZON_PERIODS = config.HORIZON_PERIODS
-LOOKBACK_PERIOD = config.LOOKBACK_PERIOD # Теперь "60d"
+LOOKBACK_PERIOD = config.LOOKBACK_PERIOD
 MIN_DATA_ROWS = config.MIN_DATA_ROWS
 TARGET_ACCURACY = config.TARGET_ACCURACY
 MIN_ACCURACY_FOR_SIGNAL = config.MIN_ACCURACY_FOR_SIGNAL
@@ -38,6 +43,10 @@ PREDICTION_PROB_THRESHOLD = config.PREDICTION_PROB_THRESHOLD
 N_SPLITS_TS_CV = config.N_SPLITS_TS_CV
 OPTUNA_STORAGE_URL = config.OPTUNA_STORAGE_URL
 OPTUNA_STUDY_NAME = config.OPTUNA_STUDY_NAME
+SEQUENCE_LENGTH = config.SEQUENCE_LENGTH
+NN_EPOCHS = config.NN_EPOCHS
+NN_BATCH_SIZE = config.NN_BATCH_SIZE
+NN_PATIENCE = config.NN_PATIENCE
 
 # --- Вспомогательные функции для технических индикаторов ---
 def compute_rsi(data, periods=14):
@@ -63,16 +72,13 @@ def compute_macd(data, fast=12, slow=26, signal=9):
     return macd, signal_line
 
 def compute_stochastic_oscillator(high, low, close, k_period=14, d_period=3):
-    """Calculates Stochastic Oscillator %K and %D."""
     lowest_low = low.rolling(window=k_period).min()
     highest_high = high.rolling(window=k_period).max()
-    
     k_percent = ((close - lowest_low) / (highest_high - lowest_low + 1e-10)) * 100
     d_percent = k_percent.rolling(window=d_period).mean()
     return k_percent, d_percent
 
 def compute_atr(high, low, close, period=14):
-    """Calculates Average True Range (ATR)."""
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
     tr3 = abs(low - close.shift(1))
@@ -81,18 +87,40 @@ def compute_atr(high, low, close, period=14):
     return atr
 
 def compute_roc(data, period=12):
-    """Calculates Rate of Change (ROC)."""
     roc = ((data - data.shift(period)) / data.shift(period)) * 100
     return roc
+
+def create_sequences(features, target, sequence_length, horizon_periods):
+    """
+    Создает последовательности признаков и соответствующие целевые значения.
+    
+    Args:
+        features (pd.DataFrame): DataFrame с признаками.
+        target (pd.Series): Series с целевой переменной.
+        sequence_length (int): Длина входной последовательности для NN.
+        horizon_periods (int): Горизонт предсказания.
+        
+    Returns:
+        tuple: (np.array X_seq, np.array y_seq)
+    """
+    X_seq, y_seq = [], []
+    # Диапазон для итерации: от начала последовательности до конца,
+    # учитывая длину последовательности и горизонт предсказания.
+    for i in range(len(features) - sequence_length - horizon_periods + 1):
+        # X_seq - это последовательность из `sequence_length` баров
+        X_seq.append(features.iloc[i:(i + sequence_length)].values)
+        # y_seq - это целевое значение, соответствующее бару через `horizon_periods`
+        # от конца текущей последовательности
+        y_seq.append(target.iloc[i + sequence_length + horizon_periods - 1])
+        
+    return np.array(X_seq), np.array(y_seq)
+
 
 def prepare_data():
     logger.info("Downloading data...")
     try:
         end_date = datetime.now()
-        # Для 15-минутных данных нет необходимости пропускать выходные,
-        # так как рынок форекс работает 24/5.
-        # Однако, Yahoo Finance может не предоставлять данные за выходные.
-        df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date) # <-- ИЗМЕНЕНО
+        df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         logger.error(f"Error downloading data: {str(e)}")
         raise ValueError(f"Error downloading data: {str(e)}")
@@ -101,7 +129,7 @@ def prepare_data():
         logger.error("Empty data received from Yahoo Finance.")
         raise ValueError("Empty data received from Yahoo Finance.")
 
-    logger.info(f"Downloaded {len(df)} rows, from {df.index[0]} to {df.index[-1]} for 15m interval.") # <-- Обновлено лог-сообщение
+    logger.info(f"Downloaded {len(df)} rows, from {df.index[0]} to {df.index[-1]} for 15m interval.")
     
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
@@ -109,24 +137,22 @@ def prepare_data():
     df = df[(df['Close'] > 0) & (df['Open'] > 0)]
     logger.info(f"After filtering Open/Close > 0: {len(df)} rows")
 
-    # Проверка на наличие и значения Volume
     if 'Volume' in df.columns and df['Volume'].sum() == 0:
         logger.warning("Volume data is present but all values are zero. This is common for forex data from Yahoo Finance.")
     elif 'Volume' not in df.columns:
         logger.warning("Volume column not found in downloaded data. It will not be used as a feature.")
-        df['Volume'] = 0 # Добавляем столбец с нулями, чтобы избежать ошибок, если он отсутствует
+        df['Volume'] = 0
 
     df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
+    # Целевая переменная теперь смотрит на HORIZON_PERIODS вперед
     df['Target'] = df['Close'].shift(-HORIZON_PERIODS)
 
     if df['Target'].isna().all():
         logger.error("Target column contains only NaNs.")
         raise ValueError("Target column contains only NaNs.")
 
-    # Создаем копию df для расчета признаков, чтобы не модифицировать исходный df
     df_features = df.copy() 
 
-    # --- Добавление новых и существующих индикаторов ---
     df_features['RSI'] = compute_rsi(df_features['Close'])
     df_features['MA20'] = df_features['Close'].rolling(window=20).mean()
     df_features['BB_Up'], df_features['BB_Low'] = compute_bollinger_bands(df_features['Close'])
@@ -136,7 +162,6 @@ def prepare_data():
     df_features['ATR'] = compute_atr(df_features['High'], df_features['Low'], df_features['Close'])
     df_features['ROC'] = compute_roc(df_features['Close'])
 
-    # --- Добавление лаговых признаков для нескольких индикаторов ---
     df_features['Close_Lag1'] = df_features['Close'].shift(1)
     df_features['RSI_Lag1'] = df_features['RSI'].shift(1)
     df_features['MACD_Lag1'] = df_features['MACD'].shift(1)
@@ -145,19 +170,11 @@ def prepare_data():
     df_features['ROC_Lag1'] = df_features['ROC'].shift(1)
     df_features['Volume_Lag1'] = df_features['Volume'].shift(1)
 
-    # --- Временные признаки ---
-    # Для 15-минутных данных DayOfMonth и Month могут быть менее значимы,
-    # но Hour и DayOfWeek по-прежнему важны.
     df_features['Hour'] = df_features.index.hour
     df_features['DayOfWeek'] = df_features.index.dayofweek
     df_features['DayOfMonth'] = df_features.index.day
     df_features['Month'] = df_features.index.month
 
-    # --- Обработка выбросов (уже есть, но убедимся) ---
-    # Для 15-минутных данных порог 0.1 может быть слишком высоким,
-    # так как процентные изменения обычно меньше.
-    # Возможно, стоит пересмотреть этот порог или убрать его,
-    # если он отфильтровывает слишком много данных.
     df_features['PriceChange'] = df_features['Close'].pct_change()
     df_features = df_features[df_features['PriceChange'].abs() < 0.1] 
 
@@ -165,11 +182,15 @@ def prepare_data():
     df_features = df_features.dropna() 
     logger.info(f"After dropna: {len(df_features)} rows (dropped {initial_rows - len(df_features)})")
 
-    if len(df_features) < MIN_DATA_ROWS:
-        logger.error(f"Insufficient data: {len(df_features)} rows, required {MIN_DATA_ROWS}")
-        raise ValueError(f"Insufficient data: {len(df_features)} rows, required {MIN_DATA_ROWS}")
+    # Проверка на минимальное количество данных для создания последовательностей
+    required_rows = SEQUENCE_LENGTH + HORIZON_PERIODS
+    if len(df_features) < required_rows:
+        logger.error(f"Insufficient data: {len(df_features)} rows, required at least {required_rows} for sequences and horizon.")
+        raise ValueError(f"Insufficient data: {len(df_features)} rows, required at least {required_rows}.")
+    
+    # Отфильтровываем NaN, которые могли появиться из-за сдвига Target
+    df_features = df_features.dropna(subset=['Target'])
 
-    # --- Определение признаков для X ---
     feature_columns = [
         'Open', 'High', 'Low', 'Close', 
         'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
@@ -178,65 +199,108 @@ def prepare_data():
         'Volume', 'Volume_Lag1',
         'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
     ]
-    X = df_features[feature_columns]
-    y = (df_features['Target'] > df_features['Close']).astype(int)
+    X_raw = df_features[feature_columns]
+    y_raw = (df_features['Target'] > df_features['Close']).astype(int) # Цель: цена через HORIZON_PERIODS выше текущей
 
-    X = X.replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(method='bfill')
+    X_raw = X_raw.replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(method='bfill')
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+    X_scaled = scaler.fit_transform(X_raw)
+    X_scaled_df = pd.DataFrame(X_scaled, columns=X_raw.columns, index=X_raw.index)
 
-    logger.info(f"X shape: {X.shape}, y distribution: {y.value_counts().to_dict()}")
-    return X, y, scaler, df_features
+    # Создаем последовательности
+    X_seq, y_seq = create_sequences(X_scaled_df, y_raw, SEQUENCE_LENGTH, HORIZON_PERIODS)
+
+    logger.info(f"X_seq shape: {X_seq.shape}, y_seq shape: {y_seq.shape}, y_seq distribution: {pd.Series(y_seq).value_counts().to_dict()}")
+    return X_seq, y_seq, scaler, df_features # df_features для получения реальной цены
 
 def train_model():
     try:
-        X, y, scaler, df_original = prepare_data()
+        X_seq, y_seq, scaler, df_original = prepare_data()
     except Exception as e:
         logger.error(f"Data preparation error, cannot train model: {e}")
         return
 
-    X_train_val, X_test, y_train_val, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    # Разделение данных на тренировочную и тестовую выборки с учетом временного ряда
+    # Для последовательностей train_test_split с shuffle=False все еще подходит
+    # если мы не делаем TimeSeriesSplit внутри Optuna objective.
+    # Но для TimeSeriesSplit нужно быть осторожным с индексами.
+    # X_seq уже содержит последовательности, поэтому TimeSeriesSplit будет работать на них.
     
+    # Убедимся, что X_seq и y_seq имеют одинаковое количество элементов
+    if len(X_seq) != len(y_seq):
+        raise ValueError("X_seq and y_seq must have the same number of samples.")
+
+    # Разделение на train/val и test
+    test_size_ratio = 0.2
+    split_index = int(len(X_seq) * (1 - test_size_ratio))
+    
+    X_train_val, X_test = X_seq[:split_index], X_seq[split_index:]
+    y_train_val, y_test = y_seq[:split_index], y_seq[split_index:]
+
     logger.info(f"Train/Validation set size: {len(X_train_val)}, Test set size: {len(X_test)}")
 
-    neg_count = y_train_val.value_counts().get(0, 0)
-    pos_count = y_train_val.value_counts().get(1, 0)
-    scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
-    logger.info(f"Class distribution in training data: Neg={neg_count}, Pos={pos_count}. scale_pos_weight={scale_pos_weight:.2f}")
-
+    # Учет дисбаланса классов
+    neg_count = pd.Series(y_train_val).value_counts().get(0, 0)
+    pos_count = pd.Series(y_train_val).value_counts().get(1, 0)
+    class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
+    logger.info(f"Class distribution in training data: Neg={neg_count}, Pos={pos_count}. Class weights={class_weight}")
 
     def objective(trial):
-        params = {
-            'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
-            'max_depth': trial.suggest_int('max_depth', 5, 15),
-            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.2, log=True),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 10.0, log=True),
-            'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 10.0, log=True),
-            'min_child_samples': trial.suggest_int('min_child_samples', 10, 100),
-            'min_gain_to_split': trial.suggest_float('min_gain_to_split', 0.0, 0.5),
-            'random_state': 42,
-            'force_col_wise': True,
-            'verbose': -1,
-            'n_jobs': -1,
-            'scale_pos_weight': scale_pos_weight,
-        }
+        # Гиперпараметры для нейронной сети
+        n_layers = trial.suggest_int('n_layers', 1, 3)
+        n_units = trial.suggest_int('n_units', 32, 256, step=32)
+        activation = trial.suggest_categorical('activation', ['relu', 'tanh'])
+        dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
+        learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
+        optimizer_name = trial.suggest_categorical('optimizer', ['Adam', 'RMSprop'])
 
-        model = LGBMClassifier(**params)
+        model = keras.Sequential()
+        # Входной слой: Flatten для преобразования 2D последовательности в 1D вектор
+        model.add(layers.Flatten(input_shape=(SEQUENCE_LENGTH, X_train_val.shape[2])))
         
+        for i in range(n_layers):
+            model.add(layers.Dense(n_units, activation=activation))
+            model.add(layers.Dropout(dropout_rate))
+        
+        # Выходной слой для бинарной классификации
+        model.add(layers.Dense(1, activation='sigmoid'))
+
+        optimizer = None
+        if optimizer_name == 'Adam':
+            optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
+        elif optimizer_name == 'RMSprop':
+            optimizer = keras.optimizers.RMSprop(learning_rate=learning_rate)
+
+        model.compile(optimizer=optimizer,
+                      loss='binary_crossentropy',
+                      metrics=['accuracy', tf.keras.metrics.F1Score(average='weighted', name='f1_score')])
+
+        # TimeSeriesSplit для кросс-валидации
         tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
         f1_scores = []
 
-        for train_index, val_index in tscv.split(X_train_val):
-            X_fold_train, X_fold_val = X_train_val.iloc[train_index], X_train_val.iloc[val_index]
-            y_fold_train, y_fold_val = y_train_val.iloc[train_index], y_train_val.iloc[val_index]
+        for fold, (train_index, val_index) in enumerate(tscv.split(X_train_val)):
+            X_fold_train, X_fold_val = X_train_val[train_index], X_train_val[val_index]
+            y_fold_train, y_fold_val = y_train_val[train_index], y_train_val[val_index]
 
-            model.fit(X_fold_train, y_fold_train)
-            preds = model.predict(X_fold_val)
-            f1_scores.append(f1_score(y_fold_val, preds))
+            # Callbacks для Optuna Pruning и Early Stopping
+            callbacks = [
+                TFKerasPruningCallback(trial, 'val_f1_score'), # Прунинг по F1-score
+                EarlyStopping(monitor='val_f1_score', patience=NN_PATIENCE, mode='max', restore_best_weights=True)
+            ]
+
+            history = model.fit(X_fold_train, y_fold_train,
+                                epochs=NN_EPOCHS,
+                                batch_size=NN_BATCH_SIZE,
+                                validation_data=(X_fold_val, y_fold_val),
+                                callbacks=callbacks,
+                                verbose=0, # Отключаем подробный вывод обучения
+                                class_weight=class_weight) # Учет весов классов
+
+            # Получаем лучший F1-score из истории обучения на валидационном наборе
+            best_val_f1 = max(history.history['val_f1_score'])
+            f1_scores.append(best_val_f1)
 
         avg_f1 = np.mean(f1_scores)
         
@@ -246,7 +310,7 @@ def train_model():
 
         return avg_f1
 
-    logger.info("🔍 Starting Optuna hyperparameter search...")
+    logger.info("🔍 Starting Optuna hyperparameter search for Neural Network...")
     study = optuna.create_study(
         direction="maximize",
         pruner=optuna.pruners.HyperbandPruner(),
@@ -267,60 +331,107 @@ def train_model():
         logger.warning(f"❌ F1-score {best_f1_score:.2f} too low. No model saved.")
         return
 
-    best_model = LGBMClassifier(**best_params, random_state=42, force_col_wise=True, verbose=-1, scale_pos_weight=scale_pos_weight)
-    best_model.fit(X_train_val, y_train_val)
+    # Обучение финальной модели с лучшими параметрами
+    final_model = keras.Sequential()
+    final_model.add(layers.Flatten(input_input_shape=(SEQUENCE_LENGTH, X_train_val.shape[2])))
+    for i in range(best_params['n_layers']):
+        final_model.add(layers.Dense(best_params['n_units'], activation=best_params['activation']))
+        final_model.add(layers.Dropout(best_params['dropout_rate']))
+    final_model.add(layers.Dense(1, activation='sigmoid'))
 
-    test_preds = best_model.predict(X_test)
-    final_accuracy = accuracy_score(y_test, test_preds)
-    final_f1_score = f1_score(y_test, test_preds)
-    logger.info(f"Final model performance on TEST set: Accuracy={final_accuracy:.4f}, F1-score={final_f1_score:.4f}")
+    optimizer = None
+    if best_params['optimizer'] == 'Adam':
+        optimizer = keras.optimizers.Adam(learning_rate=best_params['learning_rate'])
+    elif best_params['optimizer'] == 'RMSprop':
+        optimizer = keras.optimizers.RMSprop(learning_rate=best_params['learning_rate'])
 
-    joblib.dump({'model': best_model, 'scaler': scaler}, MODEL_PATH)
+    final_model.compile(optimizer=optimizer,
+                        loss='binary_crossentropy',
+                        metrics=['accuracy', tf.keras.metrics.F1Score(average='weighted', name='f1_score')])
+
+    # Callbacks для финального обучения
+    callbacks_final = [
+        EarlyStopping(monitor='val_f1_score', patience=NN_PATIENCE * 2, mode='max', restore_best_weights=True) # Увеличим patience
+    ]
+
+    # Разделяем X_train_val на train и validation для финального обучения
+    final_train_split_index = int(len(X_train_val) * 0.8) # 80% для обучения, 20% для валидации
+    X_final_train, X_final_val = X_train_val[:final_train_split_index], X_train_val[final_train_split_index:]
+    y_final_train, y_final_val = y_train_val[:final_train_split_index], y_train_val[final_train_split_index:]
+
+    logger.info(f"Final model training on {len(X_final_train)} samples, validating on {len(X_final_val)} samples.")
+    final_model.fit(X_final_train, y_final_train,
+                    epochs=NN_EPOCHS,
+                    batch_size=NN_BATCH_SIZE,
+                    validation_data=(X_final_val, y_final_val),
+                    callbacks=callbacks_final,
+                    verbose=1,
+                    class_weight=class_weight)
+
+    # Оценка на тестовом наборе
+    test_loss, test_accuracy, test_f1_score = final_model.evaluate(X_test, y_test, verbose=0)
+    logger.info(f"Final model performance on TEST set: Accuracy={test_accuracy:.4f}, F1-score={test_f1_score:.4f}")
+
+    # Сохранение модели Keras
+    final_model.save(MODEL_PATH)
+    joblib.dump({'scaler': scaler}, 'scaler.pkl') # Сохраняем scaler отдельно, т.к. модель Keras не хранит его
+
     with open(ACCURACY_PATH, "w") as f:
         json.dump({
-            "accuracy": final_accuracy,
-            "f1_score": final_f1_score,
+            "accuracy": float(test_accuracy), # Преобразуем numpy.float32 в float для JSON
+            "f1_score": float(test_f1_score), # Преобразуем numpy.float32 в float для JSON
             "last_trained": str(datetime.now()),
             "best_params": best_params
         }, f)
 
-    if not df_original.empty:
-        generate_signal(best_model, scaler, df_original.iloc[-1:], df_original.index[-1])
+    # Генерация сигнала после обучения
+    # Для генерации сигнала нам нужна последняя последовательность данных
+    # X_seq содержит все последовательности, последняя из них - самая актуальная
+    if X_seq.shape[0] > 0:
+        # Самая последняя последовательность в X_seq
+        latest_sequence_scaled = X_seq[-1:] 
+        
+        # Соответствующая ей "сырая" строка данных для получения текущей цены
+        # Это последняя строка в df_features, которая использовалась для создания X_seq
+        # df_original - это df_features до создания последовательностей
+        # Нам нужна последняя точка, которая была использована для формирования последней последовательности
+        # Это df_original.iloc[len(df_original) - 1]
+        latest_original_data_point = df_original.iloc[-1:]
+
+        generate_signal(final_model, scaler, latest_sequence_scaled, latest_original_data_point)
     else:
         logger.warning("No data to generate signal after training.")
 
-def generate_signal(model, scaler, latest_data, last_index):
+
+def generate_signal(model, scaler, latest_sequence_scaled, latest_original_data_point):
     try:
-        if latest_data.empty:
-            logger.warning("No latest data to generate signal.")
+        if latest_sequence_scaled.shape[0] == 0:
+            logger.warning("No latest sequence data to generate signal.")
+            return
+        if latest_original_data_point.empty:
+            logger.warning("No latest original data point to get current price.")
             return
 
-        feature_columns = [
-            'Open', 'High', 'Low', 'Close', 
-            'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
-            'Stoch_K', 'Stoch_D', 'ATR', 'ROC',
-            'Close_Lag1', 'RSI_Lag1', 'MACD_Lag1', 'Stoch_K_Lag1', 'ATR_Lag1', 'ROC_Lag1',
-            'Volume', 'Volume_Lag1',
-            'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
-        ]
-        features_for_scaling = latest_data[feature_columns]
+        # Предсказание вероятности
+        # predict() для Keras моделей возвращает numpy array, даже для одного предсказания
+        prediction_proba = model.predict(latest_sequence_scaled)[0] # [0] чтобы получить сам скаляр
         
-        latest_data_scaled = scaler.transform(features_for_scaling)
-        latest_data_scaled = pd.DataFrame(latest_data_scaled, columns=features_for_scaling.columns, index=latest_data.index)
-        
-        prediction_proba = model.predict_proba(latest_data_scaled)[0]
-        
-        current_price = latest_data['Close'].iloc[0] 
+        # current_price берется из немасштабированных данных
+        current_price = latest_original_data_point['Close'].iloc[0] 
         
         signal_type = "HOLD"
         stop_loss = None
         take_profit = None
 
-        if prediction_proba[1] >= PREDICTION_PROB_THRESHOLD:
+        # prediction_proba[0] - это вероятность класса 1 (движение вверх)
+        buy_probability = prediction_proba[0] 
+        sell_probability = 1 - prediction_proba[0] 
+
+        if buy_probability >= PREDICTION_PROB_THRESHOLD:
             signal_type = "BUY"
             stop_loss = current_price * 0.99
             take_profit = current_price * 1.015
-        elif prediction_proba[0] >= PREDICTION_PROB_THRESHOLD:
+        elif sell_probability >= PREDICTION_PROB_THRESHOLD: # Используем 1 - buy_probability для SELL
             signal_type = "SELL"
             stop_loss = current_price * 1.01
             take_profit = current_price * 0.985
@@ -329,8 +440,8 @@ def generate_signal(model, scaler, latest_data, last_index):
             "time": str(datetime.now()),
             "price": round(current_price, 5),
             "signal": signal_type,
-            "buy_proba": round(prediction_proba[1], 4),
-            "sell_proba": round(prediction_proba[0], 4),
+            "buy_proba": round(buy_probability, 4),
+            "sell_proba": round(sell_probability, 4),
             "stop_loss": round(stop_loss, 5) if stop_loss else "N/A",
             "take_profit": round(take_profit, 5) if take_profit else "N/A",
         }
@@ -367,13 +478,13 @@ async def root():
         else:
             logger.info(f"Model is up to date. Last trained: {last_trained}, Metric: {current_metric:.2f}")
             try:
-                model_data = joblib.load(MODEL_PATH)
-                model = model_data['model']
-                scaler = model_data['scaler']
+                # Загружаем модель Keras и scaler
+                model = keras.models.load_model(MODEL_PATH)
+                scaler_data = joblib.load('scaler.pkl')
+                scaler = scaler_data['scaler']
                 
                 end_date = datetime.now()
-                # Для 15-минутных данных нет необходимости пропускать выходные
-                df_latest_full = yf.download("EURUSD=X", interval="15m", period="7d", end=end_date) # <-- ИЗМЕНЕНО: период для получения последних данных
+                df_latest_full = yf.download("EURUSD=X", interval="15m", period="7d", end=end_date) 
                 if isinstance(df_latest_full.columns, pd.MultiIndex):
                     df_latest_full.columns = [col[0] for col in df_latest_full.columns]
                 
@@ -385,6 +496,7 @@ async def root():
 
                 df_latest_full['Close'] = df_latest_full['Close'].fillna(method='ffill').fillna(method='bfill')
                 
+                # Пересчитываем признаки для последних данных (аналогично prepare_data)
                 df_latest_full['RSI'] = compute_rsi(df_latest_full['Close'])
                 df_latest_full['MA20'] = df_latest_full['Close'].rolling(window=20).mean()
                 df_latest_full['BB_Up'], df_latest_full['BB_Low'] = compute_bollinger_bands(df_latest_full['Close'])
@@ -411,10 +523,27 @@ async def root():
                 df_latest_full = df_latest_full[df_latest_full['PriceChange'].abs() < 0.1]
                 df_latest_full = df_latest_full.dropna()
 
-                if not df_latest_full.empty:
-                    generate_signal(model, scaler, df_latest_full.iloc[-1:], df_latest_full.index[-1])
+                # Проверяем, достаточно ли данных для создания одной последовательности
+                if len(df_latest_full) >= SEQUENCE_LENGTH:
+                    # Извлекаем последнюю последовательность признаков
+                    feature_columns = [
+                        'Open', 'High', 'Low', 'Close', 
+                        'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
+                        'Stoch_K', 'Stoch_D', 'ATR', 'ROC',
+                        'Close_Lag1', 'RSI_Lag1', 'MACD_Lag1', 'Stoch_K_Lag1', 'ATR_Lag1', 'ROC_Lag1',
+                        'Volume', 'Volume_Lag1',
+                        'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
+                    ]
+                    latest_features_raw = df_latest_full[feature_columns].iloc[-SEQUENCE_LENGTH:]
+                    latest_sequence_scaled = scaler.transform(latest_features_raw)
+                    latest_sequence_scaled = np.expand_dims(latest_sequence_scaled, axis=0) # Добавляем измерение батча
+
+                    # Получаем последнюю "сырую" точку данных для текущей цены
+                    latest_original_data_point = df_latest_full.iloc[-1:]
+
+                    generate_signal(model, scaler, latest_sequence_scaled, latest_original_data_point)
                 else:
-                    logger.warning("Could not get enough latest data to generate signal from existing model.")
+                    logger.warning("Could not get enough latest data to generate signal from existing model (need at least SEQUENCE_LENGTH rows).")
             except Exception as e:
                 logger.error(f"Error loading model or generating signal from existing model: {e}")
 
