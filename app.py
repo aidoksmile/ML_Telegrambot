@@ -10,12 +10,12 @@ import json
 from fastapi import FastAPI
 import uvicorn
 from datetime import datetime, timedelta
-from send_telegram import send_telegram_message # Убедитесь, что этот файл существует и настроен
+from send_telegram import send_telegram_message
 import time
 import optuna
 import logging
 import optuna.samplers
-from optuna.integration import TFKerasPruningCallback # Для прунинга Keras моделей
+from optuna.integration import TFKerasPruningCallback
 
 import tensorflow as tf
 from tensorflow import keras
@@ -104,13 +104,8 @@ def create_sequences(features, target, sequence_length, horizon_periods):
         tuple: (np.array X_seq, np.array y_seq)
     """
     X_seq, y_seq = [], []
-    # Диапазон для итерации: от начала последовательности до конца,
-    # учитывая длину последовательности и горизонт предсказания.
     for i in range(len(features) - sequence_length - horizon_periods + 1):
-        # X_seq - это последовательность из `sequence_length` баров
         X_seq.append(features.iloc[i:(i + sequence_length)].values)
-        # y_seq - это целевое значение, соответствующее бару через `horizon_periods`
-        # от конца текущей последовательности
         y_seq.append(target.iloc[i + sequence_length + horizon_periods - 1])
         
     return np.array(X_seq), np.array(y_seq)
@@ -144,7 +139,6 @@ def prepare_data():
         df['Volume'] = 0
 
     df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
-    # Целевая переменная теперь смотрит на HORIZON_PERIODS вперед
     df['Target'] = df['Close'].shift(-HORIZON_PERIODS)
 
     if df['Target'].isna().all():
@@ -182,13 +176,11 @@ def prepare_data():
     df_features = df_features.dropna() 
     logger.info(f"After dropna: {len(df_features)} rows (dropped {initial_rows - len(df_features)})")
 
-    # Проверка на минимальное количество данных для создания последовательностей
     required_rows = SEQUENCE_LENGTH + HORIZON_PERIODS
     if len(df_features) < required_rows:
         logger.error(f"Insufficient data: {len(df_features)} rows, required at least {required_rows} for sequences and horizon.")
         raise ValueError(f"Insufficient data: {len(df_features)} rows, required at least {required_rows}.")
     
-    # Отфильтровываем NaN, которые могли появиться из-за сдвига Target
     df_features = df_features.dropna(subset=['Target'])
 
     feature_columns = [
@@ -200,7 +192,7 @@ def prepare_data():
         'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
     ]
     X_raw = df_features[feature_columns]
-    y_raw = (df_features['Target'] > df_features['Close']).astype(int) # Цель: цена через HORIZON_PERIODS выше текущей
+    y_raw = (df_features['Target'] > df_features['Close']).astype(int)
 
     X_raw = X_raw.replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(method='bfill')
 
@@ -208,11 +200,10 @@ def prepare_data():
     X_scaled = scaler.fit_transform(X_raw)
     X_scaled_df = pd.DataFrame(X_scaled, columns=X_raw.columns, index=X_raw.index)
 
-    # Создаем последовательности
     X_seq, y_seq = create_sequences(X_scaled_df, y_raw, SEQUENCE_LENGTH, HORIZON_PERIODS)
 
     logger.info(f"X_seq shape: {X_seq.shape}, y_seq shape: {y_seq.shape}, y_seq distribution: {pd.Series(y_seq).value_counts().to_dict()}")
-    return X_seq, y_seq, scaler, df_features # df_features для получения реальной цены
+    return X_seq, y_seq, scaler, df_features
 
 def train_model():
     try:
@@ -221,17 +212,9 @@ def train_model():
         logger.error(f"Data preparation error, cannot train model: {e}")
         return
 
-    # Разделение данных на тренировочную и тестовую выборки с учетом временного ряда
-    # Для последовательностей train_test_split с shuffle=False все еще подходит
-    # если мы не делаем TimeSeriesSplit внутри Optuna objective.
-    # Но для TimeSeriesSplit нужно быть осторожным с индексами.
-    # X_seq уже содержит последовательности, поэтому TimeSeriesSplit будет работать на них.
-    
-    # Убедимся, что X_seq и y_seq имеют одинаковое количество элементов
     if len(X_seq) != len(y_seq):
         raise ValueError("X_seq and y_seq must have the same number of samples.")
 
-    # Разделение на train/val и test
     test_size_ratio = 0.2
     split_index = int(len(X_seq) * (1 - test_size_ratio))
     
@@ -240,14 +223,12 @@ def train_model():
 
     logger.info(f"Train/Validation set size: {len(X_train_val)}, Test set size: {len(X_test)}")
 
-    # Учет дисбаланса классов
     neg_count = pd.Series(y_train_val).value_counts().get(0, 0)
     pos_count = pd.Series(y_train_val).value_counts().get(1, 0)
     class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
     logger.info(f"Class distribution in training data: Neg={neg_count}, Pos={pos_count}. Class weights={class_weight}")
 
     def objective(trial):
-        # Гиперпараметры для нейронной сети
         n_layers = trial.suggest_int('n_layers', 1, 3)
         n_units = trial.suggest_int('n_units', 32, 256, step=32)
         activation = trial.suggest_categorical('activation', ['relu', 'tanh'])
@@ -256,14 +237,12 @@ def train_model():
         optimizer_name = trial.suggest_categorical('optimizer', ['Adam', 'RMSprop'])
 
         model = keras.Sequential()
-        # Входной слой: Flatten для преобразования 2D последовательности в 1D вектор
         model.add(layers.Flatten(input_shape=(SEQUENCE_LENGTH, X_train_val.shape[2])))
         
         for i in range(n_layers):
             model.add(layers.Dense(n_units, activation=activation))
             model.add(layers.Dropout(dropout_rate))
         
-        # Выходной слой для бинарной классификации
         model.add(layers.Dense(1, activation='sigmoid'))
 
         optimizer = None
@@ -276,7 +255,6 @@ def train_model():
                       loss='binary_crossentropy',
                       metrics=['accuracy', tf.keras.metrics.F1Score(average='weighted', name='f1_score')])
 
-        # TimeSeriesSplit для кросс-валидации
         tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
         f1_scores = []
 
@@ -284,21 +262,23 @@ def train_model():
             X_fold_train, X_fold_val = X_train_val[train_index], X_train_val[val_index]
             y_fold_train, y_fold_val = y_train_val[train_index], y_train_val[val_index]
 
-            # Callbacks для Optuna Pruning и Early Stopping
+            # --- ИСПРАВЛЕНИЕ: Изменение формы y_fold_train и y_fold_val ---
+            y_fold_train_reshaped = np.expand_dims(y_fold_train, axis=-1)
+            y_fold_val_reshaped = np.expand_dims(y_fold_val, axis=-1)
+
             callbacks = [
-                TFKerasPruningCallback(trial, 'val_f1_score'), # Прунинг по F1-score
+                TFKerasPruningCallback(trial, 'val_f1_score'),
                 EarlyStopping(monitor='val_f1_score', patience=NN_PATIENCE, mode='max', restore_best_weights=True)
             ]
 
-            history = model.fit(X_fold_train, y_fold_train,
+            history = model.fit(X_fold_train, y_fold_train_reshaped, # Используем измененную форму
                                 epochs=NN_EPOCHS,
                                 batch_size=NN_BATCH_SIZE,
-                                validation_data=(X_fold_val, y_fold_val),
+                                validation_data=(X_fold_val, y_fold_val_reshaped), # Используем измененную форму
                                 callbacks=callbacks,
-                                verbose=0, # Отключаем подробный вывод обучения
-                                class_weight=class_weight) # Учет весов классов
+                                verbose=0,
+                                class_weight=class_weight)
 
-            # Получаем лучший F1-score из истории обучения на валидационном наборе
             best_val_f1 = max(history.history['val_f1_score'])
             f1_scores.append(best_val_f1)
 
@@ -331,9 +311,8 @@ def train_model():
         logger.warning(f"❌ F1-score {best_f1_score:.2f} too low. No model saved.")
         return
 
-    # Обучение финальной модели с лучшими параметрами
     final_model = keras.Sequential()
-    final_model.add(layers.Flatten(input_shape=(SEQUENCE_LENGTH, X_train_val.shape[2])))
+    final_model.add(layers.Flatten(input_shape=(SEQUENCE_LENGTH, X_train_val.shape[2]))) # ИСПРАВЛЕНО: input_input_shape -> input_shape
     for i in range(best_params['n_layers']):
         final_model.add(layers.Dense(best_params['n_units'], activation=best_params['activation']))
         final_model.add(layers.Dropout(best_params['dropout_rate']))
@@ -349,53 +328,45 @@ def train_model():
                         loss='binary_crossentropy',
                         metrics=['accuracy', tf.keras.metrics.F1Score(average='weighted', name='f1_score')])
 
-    # Callbacks для финального обучения
     callbacks_final = [
-        EarlyStopping(monitor='val_f1_score', patience=NN_PATIENCE * 2, mode='max', restore_best_weights=True) # Увеличим patience
+        EarlyStopping(monitor='val_f1_score', patience=NN_PATIENCE * 2, mode='max', restore_best_weights=True)
     ]
 
-    # Разделяем X_train_val на train и validation для финального обучения
-    final_train_split_index = int(len(X_train_val) * 0.8) # 80% для обучения, 20% для валидации
+    final_train_split_index = int(len(X_train_val) * 0.8)
     X_final_train, X_final_val = X_train_val[:final_train_split_index], X_train_val[final_train_split_index:]
     y_final_train, y_final_val = y_train_val[:final_train_split_index], y_train_val[final_train_split_index:]
 
+    # --- ИСПРАВЛЕНИЕ: Изменение формы y_final_train и y_final_val ---
+    y_final_train_reshaped = np.expand_dims(y_final_train, axis=-1)
+    y_final_val_reshaped = np.expand_dims(y_final_val, axis=-1)
+
     logger.info(f"Final model training on {len(X_final_train)} samples, validating on {len(X_final_val)} samples.")
-    final_model.fit(X_final_train, y_final_train,
+    final_model.fit(X_final_train, y_final_train_reshaped, # Используем измененную форму
                     epochs=NN_EPOCHS,
                     batch_size=NN_BATCH_SIZE,
-                    validation_data=(X_final_val, y_final_val),
+                    validation_data=(X_final_val, y_final_val_reshaped), # Используем измененную форму
                     callbacks=callbacks_final,
                     verbose=1,
                     class_weight=class_weight)
 
-    # Оценка на тестовом наборе
-    test_loss, test_accuracy, test_f1_score = final_model.evaluate(X_test, y_test, verbose=0)
+    # --- ИСПРАВЛЕНИЕ: Изменение формы y_test ---
+    y_test_reshaped = np.expand_dims(y_test, axis=-1)
+    test_loss, test_accuracy, test_f1_score = final_model.evaluate(X_test, y_test_reshaped, verbose=0) # Используем измененную форму
     logger.info(f"Final model performance on TEST set: Accuracy={test_accuracy:.4f}, F1-score={test_f1_score:.4f}")
 
-    # Сохранение модели Keras
     final_model.save(MODEL_PATH)
-    joblib.dump({'scaler': scaler}, 'scaler.pkl') # Сохраняем scaler отдельно, т.к. модель Keras не хранит его
+    joblib.dump({'scaler': scaler}, 'scaler.pkl')
 
     with open(ACCURACY_PATH, "w") as f:
         json.dump({
-            "accuracy": float(test_accuracy), # Преобразуем numpy.float32 в float для JSON
-            "f1_score": float(test_f1_score), # Преобразуем numpy.float32 в float для JSON
+            "accuracy": float(test_accuracy),
+            "f1_score": float(test_f1_score),
             "last_trained": str(datetime.now()),
             "best_params": best_params
         }, f)
 
-    # Генерация сигнала после обучения
-    # Для генерации сигнала нам нужна последняя последовательность данных
-    # X_seq содержит все последовательности, последняя из них - самая актуальная
     if X_seq.shape[0] > 0:
-        # Самая последняя последовательность в X_seq
         latest_sequence_scaled = X_seq[-1:] 
-        
-        # Соответствующая ей "сырая" строка данных для получения текущей цены
-        # Это последняя строка в df_features, которая использовалась для создания X_seq
-        # df_original - это df_features до создания последовательностей
-        # Нам нужна последняя точка, которая была использована для формирования последней последовательности
-        # Это df_original.iloc[len(df_original) - 1]
         latest_original_data_point = df_original.iloc[-1:]
 
         generate_signal(final_model, scaler, latest_sequence_scaled, latest_original_data_point)
@@ -412,18 +383,14 @@ def generate_signal(model, scaler, latest_sequence_scaled, latest_original_data_
             logger.warning("No latest original data point to get current price.")
             return
 
-        # Предсказание вероятности
-        # predict() для Keras моделей возвращает numpy array, даже для одного предсказания
-        prediction_proba = model.predict(latest_sequence_scaled)[0] # [0] чтобы получить сам скаляр
+        prediction_proba = model.predict(latest_sequence_scaled)[0]
         
-        # current_price берется из немасштабированных данных
         current_price = latest_original_data_point['Close'].iloc[0] 
         
         signal_type = "HOLD"
         stop_loss = None
         take_profit = None
 
-        # prediction_proba[0] - это вероятность класса 1 (движение вверх)
         buy_probability = prediction_proba[0] 
         sell_probability = 1 - prediction_proba[0] 
 
@@ -431,7 +398,7 @@ def generate_signal(model, scaler, latest_sequence_scaled, latest_original_data_
             signal_type = "BUY"
             stop_loss = current_price * 0.99
             take_profit = current_price * 1.015
-        elif sell_probability >= PREDICTION_PROB_THRESHOLD: # Используем 1 - buy_probability для SELL
+        elif sell_probability >= PREDICTION_PROB_THRESHOLD:
             signal_type = "SELL"
             stop_loss = current_price * 1.01
             take_profit = current_price * 0.985
@@ -478,7 +445,6 @@ async def root():
         else:
             logger.info(f"Model is up to date. Last trained: {last_trained}, Metric: {current_metric:.2f}")
             try:
-                # Загружаем модель Keras и scaler
                 model = keras.models.load_model(MODEL_PATH)
                 scaler_data = joblib.load('scaler.pkl')
                 scaler = scaler_data['scaler']
@@ -496,7 +462,6 @@ async def root():
 
                 df_latest_full['Close'] = df_latest_full['Close'].fillna(method='ffill').fillna(method='bfill')
                 
-                # Пересчитываем признаки для последних данных (аналогично prepare_data)
                 df_latest_full['RSI'] = compute_rsi(df_latest_full['Close'])
                 df_latest_full['MA20'] = df_latest_full['Close'].rolling(window=20).mean()
                 df_latest_full['BB_Up'], df_latest_full['BB_Low'] = compute_bollinger_bands(df_latest_full['Close'])
@@ -523,9 +488,7 @@ async def root():
                 df_latest_full = df_latest_full[df_latest_full['PriceChange'].abs() < 0.1]
                 df_latest_full = df_latest_full.dropna()
 
-                # Проверяем, достаточно ли данных для создания одной последовательности
                 if len(df_latest_full) >= SEQUENCE_LENGTH:
-                    # Извлекаем последнюю последовательность признаков
                     feature_columns = [
                         'Open', 'High', 'Low', 'Close', 
                         'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
@@ -536,9 +499,8 @@ async def root():
                     ]
                     latest_features_raw = df_latest_full[feature_columns].iloc[-SEQUENCE_LENGTH:]
                     latest_sequence_scaled = scaler.transform(latest_features_raw)
-                    latest_sequence_scaled = np.expand_dims(latest_sequence_scaled, axis=0) # Добавляем измерение батча
+                    latest_sequence_scaled = np.expand_dims(latest_sequence_scaled, axis=0)
 
-                    # Получаем последнюю "сырую" точку данных для текущей цены
                     latest_original_data_point = df_latest_full.iloc[-1:]
 
                     generate_signal(model, scaler, latest_sequence_scaled, latest_original_data_point)
