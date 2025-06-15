@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from lightgbm import LGBMClassifier
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
-from sklearn.metrics import f1_score, accuracy_score # Добавлена f1_score
+from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
 import joblib
 import os
@@ -11,12 +11,12 @@ import json
 from fastapi import FastAPI
 import uvicorn
 from datetime import datetime, timedelta
-# from send_telegram import send_telegram_message # Закомментировано, так как send_telegram_message не предоставлен
+from send_telegram import send_telegram_message # <-- РАСКОММЕНТИРОВАНО для реальной отправки
 import time
 import optuna
-import logging # Импорт модуля логирования
+import logging
+import optuna.samplers
 
-# Импорт конфигурации
 import config
 
 # --- Настройка логирования ---
@@ -36,10 +36,10 @@ MIN_ACCURACY_FOR_SIGNAL = config.MIN_ACCURACY_FOR_SIGNAL
 MAX_TRAINING_TIME = config.MAX_TRAINING_TIME
 PREDICTION_PROB_THRESHOLD = config.PREDICTION_PROB_THRESHOLD
 N_SPLITS_TS_CV = config.N_SPLITS_TS_CV
+OPTUNA_STORAGE_URL = config.OPTUNA_STORAGE_URL # <-- Добавлено
+OPTUNA_STUDY_NAME = config.OPTUNA_STUDY_NAME # <-- Добавлено
 
-# Заглушка для send_telegram_message, если она не определена
-def send_telegram_message(message):
-    logger.info(f"Telegram message (mock): {message}")
+# УДАЛЕНА ЗАГЛУШКА send_telegram_message, теперь используется импортированная функция
 
 def compute_rsi(data, periods=14):
     delta = data.diff()
@@ -67,9 +67,8 @@ def prepare_data():
     logger.info("Downloading data...")
     try:
         end_date = datetime.now()
-        while end_date.weekday() >= 5: # Пропускаем выходные
+        while end_date.weekday() >= 5:
             end_date -= timedelta(days=1)
-        # Используем LOOKBACK_PERIOD из config.py
         df = yf.download("EURUSD=X", interval="1d", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         logger.error(f"Error downloading data: {str(e)}")
@@ -94,31 +93,29 @@ def prepare_data():
         logger.error("Target column contains only NaNs.")
         raise ValueError("Target column contains only NaNs.")
 
-    df['RSI'] = compute_rsi(df['Close'])
-    df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['BB_Up'], df['BB_Low'] = compute_bollinger_bands(df['Close'])
-    df['Lag1'] = df['Close'].shift(1)
-    df['MACD'], df['MACD_Sig'] = compute_macd(df['Close'])
-    df['Hour'] = df.index.hour
-    df['DayOfWeek'] = df.index.dayofweek
-    df['PriceChange'] = df['Close'].pct_change()
-    # Внимание: фильтрация экстремальных изменений цен может отбросить важные данные.
-    # Используйте осторожно и проверьте влияние на производительность.
-    df = df[df['PriceChange'].abs() < 0.1] 
+    # Создаем копию df для расчета признаков, чтобы не модифицировать исходный df
+    df_features = df.copy() 
+    df_features['RSI'] = compute_rsi(df_features['Close'])
+    df_features['MA20'] = df_features['Close'].rolling(window=20).mean()
+    df_features['BB_Up'], df_features['BB_Low'] = compute_bollinger_bands(df_features['Close'])
+    df_features['Lag1'] = df_features['Close'].shift(1)
+    df_features['MACD'], df_features['MACD_Sig'] = compute_macd(df_features['Close'])
+    df_features['Hour'] = df_features.index.hour
+    df_features['DayOfWeek'] = df_features.index.dayofweek
+    df_features['PriceChange'] = df_features['Close'].pct_change()
+    df_features = df_features[df_features['PriceChange'].abs() < 0.1] 
 
-    initial_rows = len(df)
-    # dropna() удаляет строки, где индикаторы не могли быть рассчитаны из-за недостатка данных
-    # или где были NaN в исходных данных.
-    df = df.dropna() 
-    logger.info(f"After dropna: {len(df)} rows (dropped {initial_rows - len(df)})")
+    initial_rows = len(df_features)
+    df_features = df_features.dropna() 
+    logger.info(f"After dropna: {len(df_features)} rows (dropped {initial_rows - len(df_features)})")
 
-    if len(df) < MIN_DATA_ROWS:
-        logger.error(f"Insufficient data: {len(df)} rows, required {MIN_DATA_ROWS}")
-        raise ValueError(f"Insufficient data: {len(df)} rows, required {MIN_DATA_ROWS}")
+    if len(df_features) < MIN_DATA_ROWS:
+        logger.error(f"Insufficient data: {len(df_features)} rows, required {MIN_DATA_ROWS}")
+        raise ValueError(f"Insufficient data: {len(df_features)} rows, required {MIN_DATA_ROWS}")
 
-    X = df[['Open', 'High', 'Low', 'Close', 'RSI', 'MA20', 'BB_Up', 'BB_Low',
+    X = df_features[['Open', 'High', 'Low', 'Close', 'RSI', 'MA20', 'BB_Up', 'BB_Low',
             'Lag1', 'MACD', 'MACD_Sig', 'Hour', 'DayOfWeek']]
-    y = (df['Target'] > df['Close']).astype(int) # 1 for BUY, 0 for SELL/HOLD
+    y = (df_features['Target'] > df_features['Close']).astype(int)
 
     X = X.replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(method='bfill')
 
@@ -127,17 +124,16 @@ def prepare_data():
     X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
 
     logger.info(f"X shape: {X.shape}, y distribution: {y.value_counts().to_dict()}")
-    return X, y, scaler
+    # Возвращаем также df_features, чтобы получить доступ к немасштабированным ценам
+    return X, y, scaler, df_features 
 
 def train_model():
     try:
-        X, y, scaler = prepare_data()
+        X, y, scaler, df_original = prepare_data() # <-- Получаем df_original
     except Exception as e:
         logger.error(f"Data preparation error, cannot train model: {e}")
         return
 
-    # Разделение на обучающую/валидационную (для Optuna) и тестовую (для финальной оценки) выборки
-    # Тестовая выборка - последние 20% данных
     X_train_val, X_test, y_train_val, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     
     logger.info(f"Train/Validation set size: {len(X_train_val)}, Test set size: {len(X_test)}")
@@ -153,11 +149,11 @@ def train_model():
             'random_state': 42,
             'force_col_wise': True,
             'verbose': -1,
+            'n_jobs': -1,
         }
 
         model = LGBMClassifier(**params)
         
-        # Time Series Cross-Validation для оценки гиперпараметров
         tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
         f1_scores = []
 
@@ -167,11 +163,10 @@ def train_model():
 
             model.fit(X_fold_train, y_fold_train)
             preds = model.predict(X_fold_val)
-            f1_scores.append(f1_score(y_fold_val, preds)) # Используем f1_score
+            f1_scores.append(f1_score(y_fold_val, preds))
 
         avg_f1 = np.mean(f1_scores)
         
-        # Добавляем отчетность для прунера
         trial.report(avg_f1, trial.number)
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
@@ -179,41 +174,46 @@ def train_model():
         return avg_f1
 
     logger.info("🔍 Starting Optuna hyperparameter search...")
-    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.HyperbandPruner())
-    study.optimize(objective, timeout=MAX_TRAINING_TIME)
+    study = optuna.create_study(
+        direction="maximize",
+        pruner=optuna.pruners.HyperbandPruner(),
+        sampler=optuna.samplers.TPESampler(),
+        study_name=OPTUNA_STUDY_NAME,
+        storage=OPTUNA_STORAGE_URL,
+        load_if_exists=True
+    )
+    study.optimize(objective, n_trials=None, timeout=MAX_TRAINING_TIME)
 
     best_params = study.best_params
-    best_f1_score = study.best_value # Теперь это F1-score
+    best_f1_score = study.best_value
 
     logger.info(f"✅ Optuna best F1-score: {best_f1_score:.4f}")
     logger.info(f"📋 Best params: {best_params}")
 
-    if best_f1_score < MIN_ACCURACY_FOR_SIGNAL: # Используем F1-score для порога
+    if best_f1_score < MIN_ACCURACY_FOR_SIGNAL:
         logger.warning(f"❌ F1-score {best_f1_score:.2f} too low. No model saved.")
         return
 
-    # Обучаем финальную модель на всей обучающей/валидационной выборке с лучшими параметрами
     best_model = LGBMClassifier(**best_params, random_state=42, force_col_wise=True, verbose=-1)
     best_model.fit(X_train_val, y_train_val)
 
-    # Оцениваем финальную модель на тестовой выборке
     test_preds = best_model.predict(X_test)
-    final_accuracy = accuracy_score(y_test, test_preds) # Можно оставить accuracy для общей оценки
+    final_accuracy = accuracy_score(y_test, test_preds)
     final_f1_score = f1_score(y_test, test_preds)
     logger.info(f"Final model performance on TEST set: Accuracy={final_accuracy:.4f}, F1-score={final_f1_score:.4f}")
 
     joblib.dump({'model': best_model, 'scaler': scaler}, MODEL_PATH)
     with open(ACCURACY_PATH, "w") as f:
         json.dump({
-            "accuracy": final_accuracy, # Сохраняем финальную точность на тестовой выборке
-            "f1_score": final_f1_score, # Сохраняем финальный F1-score на тестовой выборке
+            "accuracy": final_accuracy,
+            "f1_score": final_f1_score,
             "last_trained": str(datetime.now()),
             "best_params": best_params
         }, f)
 
-    # Генерируем сигнал на основе последней доступной точки данных
-    if not X.empty:
-        generate_signal(best_model, scaler, X.iloc[-1:], X.index[-1])
+    # Генерируем сигнал на основе последней доступной точки данных (немасштабированной)
+    if not df_original.empty: # <-- Используем df_original
+        generate_signal(best_model, scaler, df_original.iloc[-1:], df_original.index[-1])
     else:
         logger.warning("No data to generate signal after training.")
 
@@ -223,30 +223,32 @@ def generate_signal(model, scaler, latest_data, last_index):
             logger.warning("No latest data to generate signal.")
             return
 
-        latest_data_scaled = scaler.transform(latest_data)
-        latest_data_scaled = pd.DataFrame(latest_data_scaled, columns=latest_data.columns, index=latest_data.index)
+        # Масштабируем только те признаки, которые используются моделью для предсказания
+        # Убедимся, что latest_data содержит все необходимые колонки для X
+        features_for_scaling = latest_data[['Open', 'High', 'Low', 'Close', 'RSI', 'MA20', 'BB_Up', 'BB_Low',
+                                            'Lag1', 'MACD', 'MACD_Sig', 'Hour', 'DayOfWeek']]
         
-        # Получаем вероятности предсказания
+        latest_data_scaled = scaler.transform(features_for_scaling)
+        latest_data_scaled = pd.DataFrame(latest_data_scaled, columns=features_for_scaling.columns, index=latest_data.index)
+        
         prediction_proba = model.predict_proba(latest_data_scaled)[0]
         
-        # Определяем сигнал на основе порога вероятности
+        # current_price берется из немасштабированных данных
+        current_price = latest_data['Close'].iloc[0] 
+        
         signal_type = "HOLD"
-        current_price = latest_data['Close'].iloc[0]
         stop_loss = None
         take_profit = None
 
-        if prediction_proba[1] >= PREDICTION_PROB_THRESHOLD: # Вероятность класса 1 (BUY)
+        if prediction_proba[1] >= PREDICTION_PROB_THRESHOLD:
             signal_type = "BUY"
-            stop_loss = current_price * 0.99 # Пример: 1% ниже
-            take_profit = current_price * 1.015 # Пример: 1.5% выше
-        elif prediction_proba[0] >= PREDICTION_PROB_THRESHOLD: # Вероятность класса 0 (SELL)
+            stop_loss = current_price * 0.99
+            take_profit = current_price * 1.015
+        elif prediction_proba[0] >= PREDICTION_PROB_THRESHOLD:
             signal_type = "SELL"
-            stop_loss = current_price * 1.01 # Пример: 1% выше
-            take_profit = current_price * 0.985 # Пример: 1.5% ниже
+            stop_loss = current_price * 1.01
+            take_profit = current_price * 0.985
         
-        # Комментарий: Фиксированные SL/TP могут быть неоптимальными.
-        # Рассмотрите динамический расчет на основе волатильности (например, ATR).
-
         signal = {
             "time": str(datetime.now()),
             "price": round(current_price, 5),
@@ -281,8 +283,7 @@ async def root():
             data = json.load(f)
         last_trained = datetime.fromisoformat(data["last_trained"])
         
-        # Используем F1-score для проверки необходимости переобучения, если он есть
-        current_metric = data.get("f1_score", data.get("accuracy", 0.0)) # Предпочитаем f1_score
+        current_metric = data.get("f1_score", data.get("accuracy", 0.0))
         
         if (datetime.now() - last_trained).days >= 1 or current_metric < TARGET_ACCURACY:
             logger.info(f"Model needs retraining. Last trained: {last_trained}, Metric: {current_metric:.2f}")
@@ -298,26 +299,28 @@ async def root():
                 while end_date.weekday() >= 5:
                     end_date -= timedelta(days=1)
                 # Загружаем достаточно данных для расчета индикаторов для последней точки
-                df_latest = yf.download("EURUSD=X", interval="1d", period="30d", end=end_date) 
-                if isinstance(df_latest.columns, pd.MultiIndex):
-                    df_latest.columns = [col[0] for col in df_latest.columns]
-                df_latest['Close'] = df_latest['Close'].fillna(method='ffill').fillna(method='bfill')
+                # Важно: df_latest должен быть полным DataFrame для расчета индикаторов
+                df_latest_full = yf.download("EURUSD=X", interval="1d", period="30d", end=end_date) 
+                if isinstance(df_latest_full.columns, pd.MultiIndex):
+                    df_latest_full.columns = [col[0] for col in df_latest_full.columns]
+                df_latest_full['Close'] = df_latest_full['Close'].fillna(method='ffill').fillna(method='bfill')
                 
-                df_latest['RSI'] = compute_rsi(df_latest['Close'])
-                df_latest['MA20'] = df_latest['Close'].rolling(window=20).mean()
-                df_latest['BB_Up'], df_latest['BB_Low'] = compute_bollinger_bands(df_latest['Close'])
-                df_latest['Lag1'] = df_latest['Close'].shift(1)
-                df_latest['MACD'], df_latest['MACD_Sig'] = compute_macd(df_latest['Close'])
-                df_latest['Hour'] = df_latest.index.hour
-                df_latest['DayOfWeek'] = df_latest.index.dayofweek
-                df_latest['PriceChange'] = df_latest['Close'].pct_change()
-                df_latest = df_latest[df_latest['PriceChange'].abs() < 0.1]
-                df_latest = df_latest.dropna()
+                # Пересчитываем признаки для последних данных
+                df_latest_full['RSI'] = compute_rsi(df_latest_full['Close'])
+                df_latest_full['MA20'] = compute_rsi(df_latest_full['Close']) # Ошибка: было compute_rsi, должно быть rolling mean
+                df_latest_full['MA20'] = df_latest_full['Close'].rolling(window=20).mean() # <-- ИСПРАВЛЕНО
+                df_latest_full['BB_Up'], df_latest_full['BB_Low'] = compute_bollinger_bands(df_latest_full['Close'])
+                df_latest_full['Lag1'] = df_latest_full['Close'].shift(1)
+                df_latest_full['MACD'], df_latest_full['MACD_Sig'] = compute_macd(df_latest_full['Close'])
+                df_latest_full['Hour'] = df_latest_full.index.hour
+                df_latest_full['DayOfWeek'] = df_latest_full.index.dayofweek
+                df_latest_full['PriceChange'] = df_latest_full['Close'].pct_change()
+                df_latest_full = df_latest_full[df_latest_full['PriceChange'].abs() < 0.1]
+                df_latest_full = df_latest_full.dropna()
 
-                if not df_latest.empty:
-                    latest_features = df_latest[['Open', 'High', 'Low', 'Close', 'RSI', 'MA20', 'BB_Up', 'BB_Low',
-                                                 'Lag1', 'MACD', 'MACD_Sig', 'Hour', 'DayOfWeek']].iloc[-1:]
-                    generate_signal(model, scaler, latest_features, latest_features.index[-1])
+                if not df_latest_full.empty:
+                    # Передаем полную последнюю строку с рассчитанными признаками и оригинальной ценой
+                    generate_signal(model, scaler, df_latest_full.iloc[-1:], df_latest_full.index[-1])
                 else:
                     logger.warning("Could not get enough latest data to generate signal from existing model.")
             except Exception as e:
