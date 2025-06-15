@@ -11,9 +11,9 @@ import json
 from fastapi import FastAPI
 import uvicorn
 from datetime import datetime, timedelta
-from send_telegram import send_telegram_message
+# from send_telegram import send_telegram_message # Закомментировано, так как send_telegram_message не предоставлен
 import time
-import optuna  # Новый импорт
+import optuna
 
 app = FastAPI()
 
@@ -26,7 +26,11 @@ LOOKBACK_PERIOD = "max"
 MIN_DATA_ROWS = 100
 TARGET_ACCURACY = 0.8
 MIN_ACCURACY_FOR_SIGNAL = 0.5
-MAX_TRAINING_TIME = 3600
+MAX_TRAINING_TIME = 3600 # Максимальное время обучения в секундах
+
+# Заглушка для send_telegram_message, если она не определена
+def send_telegram_message(message):
+    print(f"Telegram message (mock): {message}")
 
 def compute_rsi(data, periods=14):
     delta = data.diff()
@@ -54,7 +58,7 @@ def prepare_data():
     print("Downloading data...")
     try:
         end_date = datetime.now()
-        while end_date.weekday() >= 5:
+        while end_date.weekday() >= 5: # Пропускаем выходные
             end_date -= timedelta(days=1)
         df = yf.download("EURUSD=X", interval="1d", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
@@ -85,7 +89,7 @@ def prepare_data():
     df['Hour'] = df.index.hour
     df['DayOfWeek'] = df.index.dayofweek
     df['PriceChange'] = df['Close'].pct_change()
-    df = df[df['PriceChange'].abs() < 0.1]
+    df = df[df['PriceChange'].abs() < 0.1] # Отфильтровываем экстремальные изменения цен
 
     initial_rows = len(df)
     df = df.dropna()
@@ -124,16 +128,27 @@ def train_model():
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'min_child_samples': trial.suggest_int('min_child_samples', 10, 50),
             'min_gain_to_split': trial.suggest_float('min_gain_to_split', 0.0, 0.1),
+            'random_state': 42,
+            'force_col_wise': True,
+            'verbose': -1,
         }
 
-        model = LGBMClassifier(**params, random_state=42, force_col_wise=True, verbose=-1)
+        model = LGBMClassifier(**params)
         model.fit(X_train, y_train)
+        
         preds = model.predict(X_test)
         acc = accuracy_score(y_test, preds)
+        
+        # Добавляем отчетность для прунера
+        trial.report(acc, trial.number)
+        if trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
+
         return acc
 
     print("🔍 Starting Optuna hyperparameter search...")
-    study = optuna.create_study(direction="maximize")
+    # Использование HyperbandPruner для более эффективного отсечения неперспективных испытаний
+    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.HyperbandPruner())
     study.optimize(objective, timeout=MAX_TRAINING_TIME)
 
     best_params = study.best_params
@@ -157,14 +172,27 @@ def train_model():
             "best_params": best_params
         }, f)
 
-    generate_signal(best_model, scaler, X.iloc[-1:], X.index[-1])
+    # Генерируем сигнал на основе последней доступной точки данных
+    if not X.empty:
+        generate_signal(best_model, scaler, X.iloc[-1:], X.index[-1])
+    else:
+        print("No data to generate signal.")
 
 def generate_signal(model, scaler, latest_data, last_index):
     try:
+        # Проверяем, что latest_data не пуста
+        if latest_data.empty:
+            print("No latest data to generate signal.")
+            return
+
         latest_data_scaled = scaler.transform(latest_data)
         latest_data_scaled = pd.DataFrame(latest_data_scaled, columns=latest_data.columns, index=latest_data.index)
         prediction = model.predict(latest_data_scaled)[0]
         current_price = latest_data['Close'].iloc[0]
+        
+        # Расчет Stop Loss и Take Profit
+        # Для BUY (prediction == 1): SL ниже, TP выше
+        # Для SELL (prediction == 0): SL выше, TP ниже
         stop_loss = current_price * (0.99 if prediction == 1 else 1.01)
         take_profit = current_price * (1.015 if prediction == 1 else 0.985)
 
@@ -191,13 +219,53 @@ def generate_signal(model, scaler, latest_data, last_index):
 @app.get("/")
 async def root():
     if not os.path.exists(MODEL_PATH) or not os.path.exists(ACCURACY_PATH):
+        print("Model or accuracy file not found. Training new model.")
         train_model()
     else:
         with open(ACCURACY_PATH, "r") as f:
             data = json.load(f)
-        last_trained = datetime.fromisoformat(data["last_trained"])
+        last_trained = datetime.fromisoformat(data["last_trained'])
+        # Переобучаем модель, если прошло более 1 дня или точность ниже целевой
         if (datetime.now() - last_trained).days >= 1 or data["accuracy"] < TARGET_ACCURACY:
+            print(f"Model needs retraining. Last trained: {last_trained}, Accuracy: {data['accuracy']:.2f}")
             train_model()
+        else:
+            print(f"Model is up to date. Last trained: {last_trained}, Accuracy: {data['accuracy']:.2f}")
+            # Если модель актуальна, загружаем ее и генерируем сигнал с последними данными
+            try:
+                model_data = joblib.load(MODEL_PATH)
+                model = model_data['model']
+                scaler = model_data['scaler']
+                # Получаем последние данные для генерации сигнала
+                end_date = datetime.now()
+                while end_date.weekday() >= 5:
+                    end_date -= timedelta(days=1)
+                df_latest = yf.download("EURUSD=X", interval="1d", period="5d", end=end_date) # Загружаем немного больше данных
+                if isinstance(df_latest.columns, pd.MultiIndex):
+                    df_latest.columns = [col[0] for col in df_latest.columns]
+                df_latest['Close'] = df_latest['Close'].fillna(method='ffill').fillna(method='bfill')
+                
+                # Пересчитываем признаки для последних данных
+                df_latest['RSI'] = compute_rsi(df_latest['Close'])
+                df_latest['MA20'] = df_latest['Close'].rolling(window=20).mean()
+                df_latest['BB_Up'], df_latest['BB_Low'] = compute_bollinger_bands(df_latest['Close'])
+                df_latest['Lag1'] = df_latest['Close'].shift(1)
+                df_latest['MACD'], df_latest['MACD_Sig'] = compute_macd(df_latest['Close'])
+                df_latest['Hour'] = df_latest.index.hour
+                df_latest['DayOfWeek'] = df_latest.index.dayofweek
+                df_latest['PriceChange'] = df_latest['Close'].pct_change()
+                df_latest = df_latest[df_latest['PriceChange'].abs() < 0.1]
+                df_latest = df_latest.dropna()
+
+                if not df_latest.empty:
+                    latest_features = df_latest[['Open', 'High', 'Low', 'Close', 'RSI', 'MA20', 'BB_Up', 'BB_Low',
+                                                 'Lag1', 'MACD', 'MACD_Sig', 'Hour', 'DayOfWeek']].iloc[-1:]
+                    generate_signal(model, scaler, latest_features, latest_features.index[-1])
+                else:
+                    print("Could not get enough latest data to generate signal.")
+            except Exception as e:
+                print(f"Error loading model or generating signal: {e}")
+
     return {"status": "Bot is running"}
 
 if __name__ == "__main__":
