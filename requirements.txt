@@ -11,3 +11,4 @@ pandas==2.3.0
 numpy==2.3.0
 optuna
 tensorflow
+optuna-integration[tfkeras]==2.0.0
