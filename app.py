@@ -333,7 +333,7 @@ def train_model():
 
     # Обучение финальной модели с лучшими параметрами
     final_model = keras.Sequential()
-    final_model.add(layers.Flatten(input_input_shape=(SEQUENCE_LENGTH, X_train_val.shape[2])))
+    final_model.add(layers.Flatten(input_shape=(SEQUENCE_LENGTH, X_train_val.shape[2])))
     for i in range(best_params['n_layers']):
         final_model.add(layers.Dense(best_params['n_units'], activation=best_params['activation']))
         final_model.add(layers.Dropout(best_params['dropout_rate']))
