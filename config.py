@@ -1,5 +1,5 @@
 import logging
-import os # <-- ДОБАВЛЕНО: Импорт модуля os
+import os
 
 # --- General Settings ---
 LOG_LEVEL = logging.INFO # Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -20,6 +20,12 @@ PREDICTION_PROB_THRESHOLD = 0.55 # Порог вероятности для си
 # --- Time Series Split Parameters ---
 N_SPLITS_TS_CV = 3 # Количество разбиений для TimeSeriesSplit в Optuna
 
+# --- Optuna Settings ---
+# URL для хранилища Optuna. Для локального использования можно использовать SQLite.
+# Для параллельного запуска на разных машинах потребуется PostgreSQL/MySQL.
+OPTUNA_STORAGE_URL = "sqlite:///optuna_study.db" # <-- Добавлено
+OPTUNA_STUDY_NAME = "lgbm_eurusd_study" # <-- Добавлено
+
 # --- FastAPI Server Settings ---
 UVICORN_HOST = "0.0.0.0"
-UVICORN_PORT = int(os.environ.get("PORT", 10000)) # Используем переменную окружения PORT, если есть
+UVICORN_PORT = int(os.environ.get("PORT", 10000))
