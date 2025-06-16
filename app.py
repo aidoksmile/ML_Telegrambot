@@ -231,7 +231,7 @@ def train_model():
 
         avg_f1 = np.mean(f1_scores)
         
-        trial.report(avg_f1, trial.number)
+        # trial.report(avg_f1, trial.number) # Эту строку удалили
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
 
@@ -416,3 +416,4 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host=config.UVICORN_HOST, port=config.UVICORN_PORT)
+            
