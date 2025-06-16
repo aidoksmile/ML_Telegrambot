@@ -1,13 +1,14 @@
-fastapi==0.115.12
-uvicorn==0.34.3
-yfinance==0.2.63
-scikit-learn==1.7.0
-joblib==1.5.1
-python-dotenv==1.1.0
 requests==2.32.4
-beautifulsoup4==4.13.4
-lightgbm==4.5.0
+yfinance==0.2.63
 pandas==2.3.0
 numpy==1.26.4
-optuna
+scikit-learn==1.7.0
+joblib==1.5.1
+fastapi==0.115.12
+uvicorn==0.34.3
+optuna==4.3.0
+optuna-integration[lightgbm]==4.3.0 # Изменено с [tfkeras] на [lightgbm]
+lightgbm==4.5.0 # Убедимся, что LightGBM присутствует
+python-telegram-bot==21.2
+python-dotenv==1.1.0
 
