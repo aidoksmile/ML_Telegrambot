@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from lightgbm import LGBMClassifier # Возвращаем LightGBM
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
@@ -15,13 +16,6 @@ import time
 import optuna
 import logging
 import optuna.samplers
-from optuna.integration import TFKerasPruningCallback
-
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-from tensorflow.keras.callbacks import EarlyStopping
-
 import config
 
 # --- Настройка логирования ---
@@ -43,10 +37,6 @@ PREDICTION_PROB_THRESHOLD = config.PREDICTION_PROB_THRESHOLD
 N_SPLITS_TS_CV = config.N_SPLITS_TS_CV
 OPTUNA_STORAGE_URL = config.OPTUNA_STORAGE_URL
 OPTUNA_STUDY_NAME = config.OPTUNA_STUDY_NAME
-SEQUENCE_LENGTH = config.SEQUENCE_LENGTH
-NN_EPOCHS = config.NN_EPOCHS
-NN_BATCH_SIZE = config.NN_BATCH_SIZE
-NN_PATIENCE = config.NN_PATIENCE
 
 # --- Вспомогательные функции для технических индикаторов ---
 def compute_rsi(data, periods=14):
@@ -90,31 +80,11 @@ def compute_roc(data, period=12):
     roc = ((data - data.shift(period)) / data.shift(period)) * 100
     return roc
 
-def create_sequences(features, target, sequence_length, horizon_periods):
-    """
-    Создает последовательности признаков и соответствующие целевые значения.
-    
-    Args:
-        features (pd.DataFrame): DataFrame с признаками.
-        target (pd.Series): Series с целевой переменной.
-        sequence_length (int): Длина входной последовательности для NN.
-        horizon_periods (int): Горизонт предсказания.
-        
-    Returns:
-        tuple: (np.array X_seq, np.array y_seq)
-    """
-    X_seq, y_seq = [], []
-    for i in range(len(features) - sequence_length - horizon_periods + 1):
-        X_seq.append(features.iloc[i:(i + sequence_length)].values)
-        y_seq.append(target.iloc[i + sequence_length + horizon_periods - 1])
-        
-    return np.array(X_seq), np.array(y_seq)
-
-
 def prepare_data():
     logger.info("Downloading data...")
     try:
         end_date = datetime.now()
+        # Интервал 15m сохранен
         df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         logger.error(f"Error downloading data: {str(e)}")
@@ -132,13 +102,11 @@ def prepare_data():
     df = df[(df['Close'] > 0) & (df['Open'] > 0)]
     logger.info(f"After filtering Open/Close > 0: {len(df)} rows")
 
-    if 'Volume' in df.columns and df['Volume'].sum() == 0:
-        logger.warning("Volume data is present but all values are zero. This is common for forex data from Yahoo Finance.")
-    elif 'Volume' not in df.columns:
-        logger.warning("Volume column not found in downloaded data. It will not be used as a feature.")
-        df['Volume'] = 0
+    # Удалены все проверки и добавления 'Volume'
+    # df['Volume'] = 0 # Эта строка тоже удалена
 
-    df['Close'] = df['Close'].fillna(method='ffill').fillna(method='bfill')
+    # Обновляем синтаксис fillna для совместимости с будущими версиями Pandas
+    df['Close'] = df['Close'].ffill().bfill()
     df['Target'] = df['Close'].shift(-HORIZON_PERIODS)
 
     if df['Target'].isna().all():
@@ -162,7 +130,7 @@ def prepare_data():
     df_features['Stoch_K_Lag1'] = df_features['Stoch_K'].shift(1)
     df_features['ATR_Lag1'] = df_features['ATR'].shift(1)
     df_features['ROC_Lag1'] = df_features['ROC'].shift(1)
-    df_features['Volume_Lag1'] = df_features['Volume'].shift(1)
+    # df_features['Volume_Lag1'] = df_features['Volume'].shift(1) # Удалено
 
     df_features['Hour'] = df_features.index.hour
     df_features['DayOfWeek'] = df_features.index.dayofweek
@@ -176,10 +144,10 @@ def prepare_data():
     df_features = df_features.dropna() 
     logger.info(f"After dropna: {len(df_features)} rows (dropped {initial_rows - len(df_features)})")
 
-    required_rows = SEQUENCE_LENGTH + HORIZON_PERIODS
-    if len(df_features) < required_rows:
-        logger.error(f"Insufficient data: {len(df_features)} rows, required at least {required_rows} for sequences and horizon.")
-        raise ValueError(f"Insufficient data: {len(df_features)} rows, required at least {required_rows}.")
+    # Проверка на минимальное количество данных для LightGBM
+    if len(df_features) < MIN_DATA_ROWS:
+        logger.error(f"Insufficient data: {len(df_features)} rows, required at least {MIN_DATA_ROWS}.")
+        raise ValueError(f"Insufficient data: {len(df_features)} rows, required at least {MIN_DATA_ROWS}.")
     
     df_features = df_features.dropna(subset=['Target'])
 
@@ -188,99 +156,84 @@ def prepare_data():
         'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
         'Stoch_K', 'Stoch_D', 'ATR', 'ROC',
         'Close_Lag1', 'RSI_Lag1', 'MACD_Lag1', 'Stoch_K_Lag1', 'ATR_Lag1', 'ROC_Lag1',
-        'Volume', 'Volume_Lag1',
+        # 'Volume', 'Volume_Lag1', # Удалено
         'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
     ]
     X_raw = df_features[feature_columns]
     y_raw = (df_features['Target'] > df_features['Close']).astype(int)
 
-    X_raw = X_raw.replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(method='bfill')
+    # Обновляем синтаксис fillna для совместимости с будущими версиями Pandas
+    X_raw = X_raw.replace([np.inf, -np.inf], np.nan).ffill().bfill()
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
     X_scaled_df = pd.DataFrame(X_scaled, columns=X_raw.columns, index=X_raw.index)
 
-    X_seq, y_seq = create_sequences(X_scaled_df, y_raw, SEQUENCE_LENGTH, HORIZON_PERIODS)
-
-    logger.info(f"X_seq shape: {X_seq.shape}, y_seq shape: {y_seq.shape}, y_seq distribution: {pd.Series(y_seq).value_counts().to_dict()}")
-    return X_seq, y_seq, scaler, df_features
+    # Возвращаем X_scaled_df и y_raw напрямую, без создания последовательностей
+    logger.info(f"X shape: {X_scaled_df.shape}, y shape: {y_raw.shape}, y distribution: {y_raw.value_counts().to_dict()}")
+    return X_scaled_df, y_raw, scaler, df_features
 
 def train_model():
     try:
-        X_seq, y_seq, scaler, df_original = prepare_data()
+        X, y, scaler, df_original = prepare_data()
     except Exception as e:
         logger.error(f"Data preparation error, cannot train model: {e}")
         return
 
-    if len(X_seq) != len(y_seq):
-        raise ValueError("X_seq and y_seq must have the same number of samples.")
+    if len(X) != len(y):
+        raise ValueError("X and y must have the same number of samples.")
 
-    test_size_ratio = 0.2
-    split_index = int(len(X_seq) * (1 - test_size_ratio))
-    
-    X_train_val, X_test = X_seq[:split_index], X_seq[split_index:]
-    y_train_val, y_test = y_seq[:split_index], y_seq[split_index:]
+    # Разделение данных на обучающую/валидационную и тестовую выборки
+    # Используем train_test_split, так как TimeSeriesSplit будет внутри Optuna objective
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        X, y, test_size=0.2, shuffle=False, stratify=None # shuffle=False для временных рядов
+    )
 
     logger.info(f"Train/Validation set size: {len(X_train_val)}, Test set size: {len(X_test)}")
 
-    neg_count = pd.Series(y_train_val).value_counts().get(0, 0)
-    pos_count = pd.Series(y_train_val).value_counts().get(1, 0)
+    neg_count = y_train_val.value_counts().get(0, 0)
+    pos_count = y_train_val.value_counts().get(1, 0)
     class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
     logger.info(f"Class distribution in training data: Neg={neg_count}, Pos={pos_count}. Class weights={class_weight}")
 
     def objective(trial):
-        n_layers = trial.suggest_int('n_layers', 1, 3)
-        n_units = trial.suggest_int('n_units', 32, 256, step=32)
-        activation = trial.suggest_categorical('activation', ['relu', 'tanh'])
-        dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
-        learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
-        optimizer_name = trial.suggest_categorical('optimizer', ['Adam', 'RMSprop'])
+        # Гиперпараметры для LightGBM
+        params = {
+            'objective': 'binary',
+            'metric': 'binary_logloss',
+            'n_estimators': trial.suggest_int('n_estimators', 50, 500),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+            'num_leaves': trial.suggest_int('num_leaves', 20, 100),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'min_child_samples': trial.suggest_int('min_child_samples', 20, 100),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 1.0, log=True),
+            'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1.0, log=True),
+            'random_state': 42,
+            'n_jobs': -1,
+            'verbose': -1, # Отключаем логи LightGBM
+            'class_weight': class_weight # Применяем веса классов
+        }
 
-        model = keras.Sequential()
-        model.add(layers.Flatten(input_shape=(SEQUENCE_LENGTH, X_train_val.shape[2])))
-        
-        for i in range(n_layers):
-            model.add(layers.Dense(n_units, activation=activation))
-            model.add(layers.Dropout(dropout_rate))
-        
-        model.add(layers.Dense(1, activation='sigmoid'))
-
-        optimizer = None
-        if optimizer_name == 'Adam':
-            optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
-        elif optimizer_name == 'RMSprop':
-            optimizer = keras.optimizers.RMSprop(learning_rate=learning_rate)
-
-        model.compile(optimizer=optimizer,
-                      loss='binary_crossentropy',
-                      metrics=['accuracy', tf.keras.metrics.F1Score(average='weighted', name='f1_score')])
+        model = LGBMClassifier(**params)
 
         tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
         f1_scores = []
 
         for fold, (train_index, val_index) in enumerate(tscv.split(X_train_val)):
-            X_fold_train, X_fold_val = X_train_val[train_index], X_train_val[val_index]
-            y_fold_train, y_fold_val = y_train_val[train_index], y_train_val[val_index]
+            X_fold_train, X_fold_val = X_train_val.iloc[train_index], X_train_val.iloc[val_index]
+            y_fold_train, y_fold_val = y_train_val.iloc[train_index], y_train_val.iloc[val_index]
 
-            # --- ИСПРАВЛЕНИЕ: Изменение формы y_fold_train и y_fold_val ---
-            y_fold_train_reshaped = np.expand_dims(y_fold_train, axis=-1)
-            y_fold_val_reshaped = np.expand_dims(y_fold_val, axis=-1)
-
-            callbacks = [
-                TFKerasPruningCallback(trial, 'val_f1_score'),
-                EarlyStopping(monitor='val_f1_score', patience=NN_PATIENCE, mode='max', restore_best_weights=True)
-            ]
-
-            history = model.fit(X_fold_train, y_fold_train_reshaped, # Используем измененную форму
-                                epochs=NN_EPOCHS,
-                                batch_size=NN_BATCH_SIZE,
-                                validation_data=(X_fold_val, y_fold_val_reshaped), # Используем измененную форму
-                                callbacks=callbacks,
-                                verbose=0,
-                                class_weight=class_weight)
-
-            best_val_f1 = max(history.history['val_f1_score'])
-            f1_scores.append(best_val_f1)
+            model.fit(X_fold_train, y_fold_train,
+                      eval_set=[(X_fold_val, y_fold_val)],
+                      eval_metric='binary_logloss',
+                      callbacks=[optuna.integration.LightGBMPruningCallback(trial, "binary_logloss")] # Используем LightGBMPruningCallback
+                     )
+            
+            y_pred_val = model.predict(X_fold_val)
+            f1 = f1_score(y_fold_val, y_pred_val, average='weighted')
+            f1_scores.append(f1)
 
         avg_f1 = np.mean(f1_scores)
         
@@ -290,10 +243,10 @@ def train_model():
 
         return avg_f1
 
-    logger.info("🔍 Starting Optuna hyperparameter search for Neural Network...")
+    logger.info("🔍 Starting Optuna hyperparameter search for LightGBM...")
     study = optuna.create_study(
         direction="maximize",
-        pruner=optuna.pruners.HyperbandPruner(),
+        pruner=optuna.pruners.HyperbandPruner(), # Можно использовать и другие прунеры
         sampler=optuna.samplers.TPESampler(),
         study_name=OPTUNA_STUDY_NAME,
         storage=OPTUNA_STORAGE_URL,
@@ -311,50 +264,18 @@ def train_model():
         logger.warning(f"❌ F1-score {best_f1_score:.2f} too low. No model saved.")
         return
 
-    final_model = keras.Sequential()
-    final_model.add(layers.Flatten(input_shape=(SEQUENCE_LENGTH, X_train_val.shape[2]))) # ИСПРАВЛЕНО: input_input_shape -> input_shape
-    for i in range(best_params['n_layers']):
-        final_model.add(layers.Dense(best_params['n_units'], activation=best_params['activation']))
-        final_model.add(layers.Dropout(best_params['dropout_rate']))
-    final_model.add(layers.Dense(1, activation='sigmoid'))
+    # Обучение финальной модели LightGBM на всех данных train_val
+    final_model = LGBMClassifier(**best_params, random_state=42, n_jobs=-1, verbose=-1)
+    final_model.fit(X_train_val, y_train_val)
 
-    optimizer = None
-    if best_params['optimizer'] == 'Adam':
-        optimizer = keras.optimizers.Adam(learning_rate=best_params['learning_rate'])
-    elif best_params['optimizer'] == 'RMSprop':
-        optimizer = keras.optimizers.RMSprop(learning_rate=best_params['learning_rate'])
-
-    final_model.compile(optimizer=optimizer,
-                        loss='binary_crossentropy',
-                        metrics=['accuracy', tf.keras.metrics.F1Score(average='weighted', name='f1_score')])
-
-    callbacks_final = [
-        EarlyStopping(monitor='val_f1_score', patience=NN_PATIENCE * 2, mode='max', restore_best_weights=True)
-    ]
-
-    final_train_split_index = int(len(X_train_val) * 0.8)
-    X_final_train, X_final_val = X_train_val[:final_train_split_index], X_train_val[final_train_split_index:]
-    y_final_train, y_final_val = y_train_val[:final_train_split_index], y_train_val[final_train_split_index:]
-
-    # --- ИСПРАВЛЕНИЕ: Изменение формы y_final_train и y_final_val ---
-    y_final_train_reshaped = np.expand_dims(y_final_train, axis=-1)
-    y_final_val_reshaped = np.expand_dims(y_final_val, axis=-1)
-
-    logger.info(f"Final model training on {len(X_final_train)} samples, validating on {len(X_final_val)} samples.")
-    final_model.fit(X_final_train, y_final_train_reshaped, # Используем измененную форму
-                    epochs=NN_EPOCHS,
-                    batch_size=NN_BATCH_SIZE,
-                    validation_data=(X_final_val, y_final_val_reshaped), # Используем измененную форму
-                    callbacks=callbacks_final,
-                    verbose=1,
-                    class_weight=class_weight)
-
-    # --- ИСПРАВЛЕНИЕ: Изменение формы y_test ---
-    y_test_reshaped = np.expand_dims(y_test, axis=-1)
-    test_loss, test_accuracy, test_f1_score = final_model.evaluate(X_test, y_test_reshaped, verbose=0) # Используем измененную форму
+    # Оценка на тестовом наборе
+    y_pred_test = final_model.predict(X_test)
+    test_accuracy = accuracy_score(y_test, y_pred_test)
+    test_f1_score = f1_score(y_test, y_pred_test, average='weighted')
     logger.info(f"Final model performance on TEST set: Accuracy={test_accuracy:.4f}, F1-score={test_f1_score:.4f}")
 
-    final_model.save(MODEL_PATH)
+    # Сохранение модели LightGBM
+    joblib.dump(final_model, MODEL_PATH)
     joblib.dump({'scaler': scaler}, 'scaler.pkl')
 
     with open(ACCURACY_PATH, "w") as f:
@@ -365,25 +286,28 @@ def train_model():
             "best_params": best_params
         }, f)
 
-    if X_seq.shape[0] > 0:
-        latest_sequence_scaled = X_seq[-1:] 
+    # Генерация сигнала с использованием последней точки данных
+    if len(X) > 0:
+        # Для LightGBM нам нужна последняя строка признаков
+        latest_features_scaled = X.iloc[-1:].values # Получаем последнюю строку и преобразуем в numpy array
         latest_original_data_point = df_original.iloc[-1:]
 
-        generate_signal(final_model, scaler, latest_sequence_scaled, latest_original_data_point)
+        generate_signal(final_model, scaler, latest_features_scaled, latest_original_data_point)
     else:
         logger.warning("No data to generate signal after training.")
 
 
-def generate_signal(model, scaler, latest_sequence_scaled, latest_original_data_point):
+def generate_signal(model, scaler, latest_features_scaled, latest_original_data_point):
     try:
-        if latest_sequence_scaled.shape[0] == 0:
-            logger.warning("No latest sequence data to generate signal.")
+        if latest_features_scaled.shape[0] == 0:
+            logger.warning("No latest features data to generate signal.")
             return
         if latest_original_data_point.empty:
             logger.warning("No latest original data point to get current price.")
             return
 
-        prediction_proba = model.predict(latest_sequence_scaled)[0]
+        # Для LightGBM predict_proba возвращает массив [вероятность_класса_0, вероятность_класса_1]
+        prediction_proba = model.predict_proba(latest_features_scaled)[0]
         
         current_price = latest_original_data_point['Close'].iloc[0] 
         
@@ -391,8 +315,8 @@ def generate_signal(model, scaler, latest_sequence_scaled, latest_original_data_
         stop_loss = None
         take_profit = None
 
-        buy_probability = prediction_proba[0] 
-        sell_probability = 1 - prediction_proba[0] 
+        buy_probability = prediction_proba[1] # Вероятность класса 1 (BUY)
+        sell_probability = prediction_proba[0] # Вероятность класса 0 (SELL)
 
         if buy_probability >= PREDICTION_PROB_THRESHOLD:
             signal_type = "BUY"
@@ -445,22 +369,22 @@ async def root():
         else:
             logger.info(f"Model is up to date. Last trained: {last_trained}, Metric: {current_metric:.2f}")
             try:
-                model = keras.models.load_model(MODEL_PATH)
+                # Загрузка модели LightGBM
+                model = joblib.load(MODEL_PATH)
                 scaler_data = joblib.load('scaler.pkl')
                 scaler = scaler_data['scaler']
                 
                 end_date = datetime.now()
+                # Интервал 15m сохранен
                 df_latest_full = yf.download("EURUSD=X", interval="15m", period="7d", end=end_date) 
                 if isinstance(df_latest_full.columns, pd.MultiIndex):
                     df_latest_full.columns = [col[0] for col in df_latest_full.columns]
                 
-                if 'Volume' in df_latest_full.columns and df_latest_full['Volume'].sum() == 0:
-                    logger.warning("Volume data for latest download is present but all values are zero.")
-                elif 'Volume' not in df_latest_full.columns:
-                    logger.warning("Volume column not found in latest downloaded data. It will not be used as a feature.")
-                    df_latest_full['Volume'] = 0
+                # Удалены все проверки и добавления 'Volume'
+                # df_latest_full['Volume'] = 0 # Эта строка тоже удалена
 
-                df_latest_full['Close'] = df_latest_full['Close'].fillna(method='ffill').fillna(method='bfill')
+                # Обновляем синтаксис fillna для совместимости с будущими версиями Pandas
+                df_latest_full['Close'] = df_latest_full['Close'].ffill().bfill()
                 
                 df_latest_full['RSI'] = compute_rsi(df_latest_full['Close'])
                 df_latest_full['MA20'] = df_latest_full['Close'].rolling(window=20).mean()
@@ -477,7 +401,7 @@ async def root():
                 df_latest_full['Stoch_K_Lag1'] = df_latest_full['Stoch_K'].shift(1)
                 df_latest_full['ATR_Lag1'] = df_latest_full['ATR'].shift(1)
                 df_latest_full['ROC_Lag1'] = df_latest_full['ROC'].shift(1)
-                df_latest_full['Volume_Lag1'] = df_latest_full['Volume'].shift(1)
+                # df_latest_full['Volume_Lag1'] = df_latest_full['Volume'].shift(1) # Удалено
 
                 df_latest_full['Hour'] = df_latest_full.index.hour
                 df_latest_full['DayOfWeek'] = df_latest_full.index.dayofweek
@@ -488,24 +412,23 @@ async def root():
                 df_latest_full = df_latest_full[df_latest_full['PriceChange'].abs() < 0.1]
                 df_latest_full = df_latest_full.dropna()
 
-                if len(df_latest_full) >= SEQUENCE_LENGTH:
+                if len(df_latest_full) >= 1: # Для LightGBM нужна хотя бы 1 строка
                     feature_columns = [
                         'Open', 'High', 'Low', 'Close', 
                         'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
                         'Stoch_K', 'Stoch_D', 'ATR', 'ROC',
                         'Close_Lag1', 'RSI_Lag1', 'MACD_Lag1', 'Stoch_K_Lag1', 'ATR_Lag1', 'ROC_Lag1',
-                        'Volume', 'Volume_Lag1',
+                        # 'Volume', 'Volume_Lag1', # Удалено
                         'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
                     ]
-                    latest_features_raw = df_latest_full[feature_columns].iloc[-SEQUENCE_LENGTH:]
-                    latest_sequence_scaled = scaler.transform(latest_features_raw)
-                    latest_sequence_scaled = np.expand_dims(latest_sequence_scaled, axis=0)
-
+                    latest_features_raw = df_latest_full[feature_columns].iloc[-1:] # Берем последнюю строку
+                    latest_features_scaled = scaler.transform(latest_features_raw)
+                    
                     latest_original_data_point = df_latest_full.iloc[-1:]
 
-                    generate_signal(model, scaler, latest_sequence_scaled, latest_original_data_point)
+                    generate_signal(model, scaler, latest_features_scaled, latest_original_data_point)
                 else:
-                    logger.warning("Could not get enough latest data to generate signal from existing model (need at least SEQUENCE_LENGTH rows).")
+                    logger.warning("Could not get enough latest data to generate signal from existing model (need at least 1 row).")
             except Exception as e:
                 logger.error(f"Error loading model or generating signal from existing model: {e}")
 
