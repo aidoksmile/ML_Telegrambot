@@ -1,35 +1,31 @@
-import logging
 import os
+import logging
 
 # --- General Settings ---
 LOG_LEVEL = logging.INFO # Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 
 # --- Model Paths ---
-MODEL_PATH = "model.h5" # Изменено на .h5 для Keras моделей
-ACCURACY_PATH = "accuracy.json"
+MODEL_PATH = "model.pkl" # Путь для сохранения обученной модели
+ACCURACY_PATH = "accuracy.json" # Путь для сохранения метрик точности
 
-# --- Strategy Parameters ---
-HORIZON_PERIODS = 96 # 1 день (96 * 15-минутных интервалов)
-LOOKBACK_PERIOD = "60d" # Максимум для 15-минутных данных от Yahoo Finance
-MIN_DATA_ROWS = 500 # Увеличено для создания последовательностей и горизонта предсказания
-TARGET_ACCURACY = 0.8 # Целевая точность (F1-score), может быть сложнее достичь с NN
-MIN_ACCURACY_FOR_SIGNAL = 0.5
-MAX_TRAINING_TIME = 7200 # Увеличено до 2 часов для обучения нейронной сети
-PREDICTION_PROB_THRESHOLD = 0.55 # Порог вероятности для сигнала BUY/SELL. Если ниже, то HOLD.
+# --- Data & Feature Engineering Parameters ---
+HORIZON_PERIODS = 1 # Горизонт предсказания (на сколько периодов вперед предсказываем)
+LOOKBACK_PERIOD = "60d" # Период загрузки исторических данных (например, "60d" для 60 дней, "1y" для 1 года)
+MIN_DATA_ROWS = 100 # Минимальное количество строк данных для обучения модели
 
-# --- Time Series Split Parameters ---
-N_SPLITS_TS_CV = 3 # Количество разбиений для TimeSeriesSplit в Optuna
+# --- Training & Optimization Parameters ---
+TARGET_ACCURACY = 0.6 # Целевая точность/F1-score для модели (если ниже, модель переобучается)
+MIN_ACCURACY_FOR_SIGNAL = 0.5 # Минимальная точность/F1-score для генерации торговых сигналов
+MAX_TRAINING_TIME = 7200 # Максимальное время обучения модели в секундах (2 часа)
+N_SPLITS_TS_CV = 5 # Количество фолдов для TimeSeriesSplit кросс-валидации в Optuna
 
 # --- Optuna Settings ---
-OPTUNA_STORAGE_URL = "sqlite:///optuna_study_nn.db" # Новая база данных для исследования NN
-OPTUNA_STUDY_NAME = "nn_eurusd_study" # Новое имя исследования
+OPTUNA_STORAGE_URL = "sqlite:///db.sqlite3" # URL для хранения результатов Optuna (можно использовать PostgreSQL, MySQL и т.д.)
+OPTUNA_STUDY_NAME = "lgbm_eurusd_study" # Имя исследования Optuna
 
-# --- Neural Network Settings ---
-SEQUENCE_LENGTH = 40 # Количество предыдущих 15-минутных баров для использования в качестве входной последовательности
-NN_EPOCHS = 100 # Максимальное количество эпох, будет использоваться EarlyStopping
-NN_BATCH_SIZE = 32 # Размер батча для обучения NN
-NN_PATIENCE = 10 # Количество эпох без улучшения для Early Stopping
+# --- Signal Generation Parameters ---
+PREDICTION_PROB_THRESHOLD = 0.55 # Порог вероятности для генерации сигнала (например, >0.55 для BUY, <0.45 для SELL)
 
-# --- FastAPI Server Settings ---
+# --- FastAPI/Uvicorn Settings ---
 UVICORN_HOST = "0.0.0.0"
-UVICORN_PORT = int(os.environ.get("PORT", 10000))
+UVICORN_PORT = int(os.environ.get("PORT", 10000)) # Используем переменную окружения PORT, если есть
