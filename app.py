@@ -1,7 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from lightgbm import LGBMClassifier # Возвращаем LightGBM
+from lightgbm import LGBMClassifier
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
@@ -84,7 +84,6 @@ def prepare_data():
     logger.info("Downloading data...")
     try:
         end_date = datetime.now()
-        # Интервал 15m сохранен
         df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
     except Exception as e:
         logger.error(f"Error downloading data: {str(e)}")
@@ -102,10 +101,6 @@ def prepare_data():
     df = df[(df['Close'] > 0) & (df['Open'] > 0)]
     logger.info(f"After filtering Open/Close > 0: {len(df)} rows")
 
-    # Удалены все проверки и добавления 'Volume'
-    # df['Volume'] = 0 # Эта строка тоже удалена
-
-    # Обновляем синтаксис fillna для совместимости с будущими версиями Pandas
     df['Close'] = df['Close'].ffill().bfill()
     df['Target'] = df['Close'].shift(-HORIZON_PERIODS)
 
@@ -130,7 +125,6 @@ def prepare_data():
     df_features['Stoch_K_Lag1'] = df_features['Stoch_K'].shift(1)
     df_features['ATR_Lag1'] = df_features['ATR'].shift(1)
     df_features['ROC_Lag1'] = df_features['ROC'].shift(1)
-    # df_features['Volume_Lag1'] = df_features['Volume'].shift(1) # Удалено
 
     df_features['Hour'] = df_features.index.hour
     df_features['DayOfWeek'] = df_features.index.dayofweek
@@ -144,7 +138,6 @@ def prepare_data():
     df_features = df_features.dropna() 
     logger.info(f"After dropna: {len(df_features)} rows (dropped {initial_rows - len(df_features)})")
 
-    # Проверка на минимальное количество данных для LightGBM
     if len(df_features) < MIN_DATA_ROWS:
         logger.error(f"Insufficient data: {len(df_features)} rows, required at least {MIN_DATA_ROWS}.")
         raise ValueError(f"Insufficient data: {len(df_features)} rows, required at least {MIN_DATA_ROWS}.")
@@ -156,20 +149,17 @@ def prepare_data():
         'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
         'Stoch_K', 'Stoch_D', 'ATR', 'ROC',
         'Close_Lag1', 'RSI_Lag1', 'MACD_Lag1', 'Stoch_K_Lag1', 'ATR_Lag1', 'ROC_Lag1',
-        # 'Volume', 'Volume_Lag1', # Удалено
         'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
     ]
     X_raw = df_features[feature_columns]
     y_raw = (df_features['Target'] > df_features['Close']).astype(int)
 
-    # Обновляем синтаксис fillna для совместимости с будущими версиями Pandas
     X_raw = X_raw.replace([np.inf, -np.inf], np.nan).ffill().bfill()
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
     X_scaled_df = pd.DataFrame(X_scaled, columns=X_raw.columns, index=X_raw.index)
 
-    # Возвращаем X_scaled_df и y_raw напрямую, без создания последовательностей
     logger.info(f"X shape: {X_scaled_df.shape}, y shape: {y_raw.shape}, y distribution: {y_raw.value_counts().to_dict()}")
     return X_scaled_df, y_raw, scaler, df_features
 
@@ -183,10 +173,8 @@ def train_model():
     if len(X) != len(y):
         raise ValueError("X and y must have the same number of samples.")
 
-    # Разделение данных на обучающую/валидационную и тестовую выборки
-    # Используем train_test_split, так как TimeSeriesSplit будет внутри Optuna objective
     X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False, stratify=None # shuffle=False для временных рядов
+        X, y, test_size=0.2, shuffle=False, stratify=None
     )
 
     logger.info(f"Train/Validation set size: {len(X_train_val)}, Test set size: {len(X_test)}")
@@ -197,7 +185,6 @@ def train_model():
     logger.info(f"Class distribution in training data: Neg={neg_count}, Pos={pos_count}. Class weights={class_weight}")
 
     def objective(trial):
-        # Гиперпараметры для LightGBM
         params = {
             'objective': 'binary',
             'metric': 'binary_logloss',
@@ -212,8 +199,8 @@ def train_model():
             'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1.0, log=True),
             'random_state': 42,
             'n_jobs': -1,
-            'verbose': -1, # Отключаем логи LightGBM
-            'class_weight': class_weight # Применяем веса классов
+            'verbose': -1,
+            'class_weight': class_weight
         }
 
         model = LGBMClassifier(**params)
@@ -228,7 +215,7 @@ def train_model():
             model.fit(X_fold_train, y_fold_train,
                       eval_set=[(X_fold_val, y_fold_val)],
                       eval_metric='binary_logloss',
-                      callbacks=[optuna.integration.LightGBMPruningCallback(trial, "binary_logloss")] # Используем LightGBMPruningCallback
+                      callbacks=[optuna.integration.LightGBMPruningCallback(trial, "binary_logloss", direction="minimize")] # ИСПРАВЛЕНО
                      )
             
             y_pred_val = model.predict(X_fold_val)
@@ -246,7 +233,7 @@ def train_model():
     logger.info("🔍 Starting Optuna hyperparameter search for LightGBM...")
     study = optuna.create_study(
         direction="maximize",
-        pruner=optuna.pruners.HyperbandPruner(), # Можно использовать и другие прунеры
+        pruner=optuna.pruners.HyperbandPruner(),
         sampler=optuna.samplers.TPESampler(),
         study_name=OPTUNA_STUDY_NAME,
         storage=OPTUNA_STORAGE_URL,
@@ -264,17 +251,14 @@ def train_model():
         logger.warning(f"❌ F1-score {best_f1_score:.2f} too low. No model saved.")
         return
 
-    # Обучение финальной модели LightGBM на всех данных train_val
     final_model = LGBMClassifier(**best_params, random_state=42, n_jobs=-1, verbose=-1)
     final_model.fit(X_train_val, y_train_val)
 
-    # Оценка на тестовом наборе
     y_pred_test = final_model.predict(X_test)
     test_accuracy = accuracy_score(y_test, y_pred_test)
     test_f1_score = f1_score(y_test, y_pred_test, average='weighted')
     logger.info(f"Final model performance on TEST set: Accuracy={test_accuracy:.4f}, F1-score={test_f1_score:.4f}")
 
-    # Сохранение модели LightGBM
     joblib.dump(final_model, MODEL_PATH)
     joblib.dump({'scaler': scaler}, 'scaler.pkl')
 
@@ -286,10 +270,8 @@ def train_model():
             "best_params": best_params
         }, f)
 
-    # Генерация сигнала с использованием последней точки данных
     if len(X) > 0:
-        # Для LightGBM нам нужна последняя строка признаков
-        latest_features_scaled = X.iloc[-1:].values # Получаем последнюю строку и преобразуем в numpy array
+        latest_features_scaled = X.iloc[-1:].values
         latest_original_data_point = df_original.iloc[-1:]
 
         generate_signal(final_model, scaler, latest_features_scaled, latest_original_data_point)
@@ -306,7 +288,6 @@ def generate_signal(model, scaler, latest_features_scaled, latest_original_data_
             logger.warning("No latest original data point to get current price.")
             return
 
-        # Для LightGBM predict_proba возвращает массив [вероятность_класса_0, вероятность_класса_1]
         prediction_proba = model.predict_proba(latest_features_scaled)[0]
         
         current_price = latest_original_data_point['Close'].iloc[0] 
@@ -315,8 +296,8 @@ def generate_signal(model, scaler, latest_features_scaled, latest_original_data_
         stop_loss = None
         take_profit = None
 
-        buy_probability = prediction_proba[1] # Вероятность класса 1 (BUY)
-        sell_probability = prediction_proba[0] # Вероятность класса 0 (SELL)
+        buy_probability = prediction_proba[1]
+        sell_probability = prediction_proba[0]
 
         if buy_probability >= PREDICTION_PROB_THRESHOLD:
             signal_type = "BUY"
@@ -369,21 +350,15 @@ async def root():
         else:
             logger.info(f"Model is up to date. Last trained: {last_trained}, Metric: {current_metric:.2f}")
             try:
-                # Загрузка модели LightGBM
                 model = joblib.load(MODEL_PATH)
                 scaler_data = joblib.load('scaler.pkl')
                 scaler = scaler_data['scaler']
                 
                 end_date = datetime.now()
-                # Интервал 15m сохранен
                 df_latest_full = yf.download("EURUSD=X", interval="15m", period="7d", end=end_date) 
                 if isinstance(df_latest_full.columns, pd.MultiIndex):
                     df_latest_full.columns = [col[0] for col in df_latest_full.columns]
                 
-                # Удалены все проверки и добавления 'Volume'
-                # df_latest_full['Volume'] = 0 # Эта строка тоже удалена
-
-                # Обновляем синтаксис fillna для совместимости с будущими версиями Pandas
                 df_latest_full['Close'] = df_latest_full['Close'].ffill().bfill()
                 
                 df_latest_full['RSI'] = compute_rsi(df_latest_full['Close'])
@@ -401,7 +376,6 @@ async def root():
                 df_latest_full['Stoch_K_Lag1'] = df_latest_full['Stoch_K'].shift(1)
                 df_latest_full['ATR_Lag1'] = df_latest_full['ATR'].shift(1)
                 df_latest_full['ROC_Lag1'] = df_latest_full['ROC'].shift(1)
-                # df_latest_full['Volume_Lag1'] = df_latest_full['Volume'].shift(1) # Удалено
 
                 df_latest_full['Hour'] = df_latest_full.index.hour
                 df_latest_full['DayOfWeek'] = df_latest_full.index.dayofweek
@@ -412,16 +386,15 @@ async def root():
                 df_latest_full = df_latest_full[df_latest_full['PriceChange'].abs() < 0.1]
                 df_latest_full = df_latest_full.dropna()
 
-                if len(df_latest_full) >= 1: # Для LightGBM нужна хотя бы 1 строка
+                if len(df_latest_full) >= 1:
                     feature_columns = [
                         'Open', 'High', 'Low', 'Close', 
                         'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
                         'Stoch_K', 'Stoch_D', 'ATR', 'ROC',
                         'Close_Lag1', 'RSI_Lag1', 'MACD_Lag1', 'Stoch_K_Lag1', 'ATR_Lag1', 'ROC_Lag1',
-                        # 'Volume', 'Volume_Lag1', # Удалено
                         'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
                     ]
-                    latest_features_raw = df_latest_full[feature_columns].iloc[-1:] # Берем последнюю строку
+                    latest_features_raw = df_latest_full[feature_columns].iloc[-1:]
                     latest_features_scaled = scaler.transform(latest_features_raw)
                     
                     latest_original_data_point = df_latest_full.iloc[-1:]
