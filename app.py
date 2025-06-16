@@ -19,7 +19,7 @@ import optuna.samplers
 import config
 
 # --- Настройка логирования ---
-logging.basicConfig(level=config.LOG_LEVEL, format=\'%(asctime)s - %(levelname)s - %(message)s\')
+logging.basicConfig(level=config.LOG_LEVEL, format="""%(asctime)s - %(levelname)s - %(message)s""")
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
@@ -82,10 +82,10 @@ def compute_roc(data, period=12):
 
 # --- Пользовательская метрика F1-score для LightGBM ---
 def lgbm_f1_score(y_pred, y_true):
-    # Явно преобразуем y_true в целочисленный тип, чтобы избежать ошибки
-    y_true_binary = y_true.astype(int)
+    # Получаем метки из LightGBM Dataset и явно преобразуем их в целочисленный тип
+    y_true_labels = y_true.get_label().astype(int)
     y_pred_binary = (y_pred > 0.5).astype(int) # Преобразуем вероятности в бинарные предсказания
-    return \'f1_score\', f1_score(y_true_binary, y_pred_binary, average=\'weighted\'), True # True означает, что чем выше, тем лучше
+    return 'f1_score', f1_score(y_true_labels, y_pred_binary, average='weighted'), True # True означает, что чем выше, тем лучше
 
 def prepare_data():
     logger.info("Downloading data...")
@@ -222,11 +222,11 @@ def train_model():
             model.fit(X_fold_train, y_fold_train,
                       eval_set=[(X_fold_val, y_fold_val)],
                       eval_metric=lgbm_f1_score, # Используем пользовательскую метрику F1-score
-                      callbacks=[optuna.integration.LightGBMPruningCallback(trial, "f1_score")] # Отслеживаем \'f1_score\' для прунинга
+                      callbacks=[optuna.integration.LightGBMPruningCallback(trial, "f1_score")] # Отслеживаем 'f1_score' для прунинга
                      )
             
             y_pred_val = model.predict(X_fold_val)
-            f1 = f1_score(y_fold_val, y_pred_val, average=\'weighted\')
+            f1 = f1_score(y_fold_val, y_pred_val, average='weighted')
             f1_scores.append(f1)
 
         avg_f1 = np.mean(f1_scores)
@@ -263,11 +263,11 @@ def train_model():
 
     y_pred_test = final_model.predict(X_test)
     test_accuracy = accuracy_score(y_test, y_pred_test)
-    test_f1_score = f1_score(y_test, y_pred_test, average=\'weighted\')
+    test_f1_score = f1_score(y_test, y_pred_test, average='weighted')
     logger.info(f"Final model performance on TEST set: Accuracy={test_accuracy:.4f}, F1-score={test_f1_score:.4f}")
 
     joblib.dump(final_model, MODEL_PATH)
-    joblib.dump({\'scaler\': scaler}, \'scaler.pkl\')
+    joblib.dump({'scaler': scaler}, 'scaler.pkl')
 
     with open(ACCURACY_PATH, "w") as f:
         json.dump({
@@ -297,7 +297,7 @@ def generate_signal(model, scaler, latest_features_scaled, latest_original_data_
 
         prediction_proba = model.predict_proba(latest_features_scaled)[0]
         
-        current_price = latest_original_data_point["Close"].iloc[0] 
+        current_price = latest_original_data_point['Close'].iloc[0] 
         
         signal_type = "HOLD"
         stop_loss = None
@@ -326,13 +326,13 @@ def generate_signal(model, scaler, latest_features_scaled, latest_original_data_
         }
 
         msg = (
-            f"📊 Signal: {signal["signal"]}\n"
-            f"🕒 Time: {signal["time"]}\n"
-            f"💰 Price: {signal["price"]}\n"
-            f"⬆️ Buy Proba: {signal["buy_proba"]}\n"
-            f"⬇️ Sell Proba: {signal["sell_proba"]}\n"
-            f"📉 Stop Loss: {signal["stop_loss"]}\n"
-            f"📈 Take Profit: {signal["take_profit"]}"
+            f"📊 Signal: {signal['signal']}\n"
+            f"🕒 Time: {signal['time']}\n"
+            f"💰 Price: {signal['price']}\n"
+            f"⬆️ Buy Proba: {signal['buy_proba']}\n"
+            f"⬇️ Sell Proba: {signal['sell_proba']}\n"
+            f"📉 Stop Loss: {signal['stop_loss']}\n"
+            f"📈 Take Profit: {signal['take_profit']}"
         )
         logger.info(f"Signal generated:\n{msg}")
         send_telegram_message(msg)
@@ -358,48 +358,48 @@ async def root():
             logger.info(f"Model is up to date. Last trained: {last_trained}, Metric: {current_metric:.2f}")
             try:
                 model = joblib.load(MODEL_PATH)
-                scaler_data = joblib.load(\'scaler.pkl\')
-                scaler = scaler_data["scaler"]
+                scaler_data = joblib.load('scaler.pkl')
+                scaler = scaler_data['scaler']
                 
                 end_date = datetime.now()
                 df_latest_full = yf.download("EURUSD=X", interval="15m", period="7d", end=end_date) 
                 if isinstance(df_latest_full.columns, pd.MultiIndex):
                     df_latest_full.columns = [col[0] for col in df_latest_full.columns]
                 
-                df_latest_full["Close"] = df_latest_full["Close"].ffill().bfill()
+                df_latest_full['Close'] = df_latest_full['Close'].ffill().bfill()
                 
-                df_latest_full["RSI"] = compute_rsi(df_latest_full["Close"])
-                df_latest_full["MA20"] = df_latest_full["Close"].rolling(window=20).mean()
-                df_latest_full["BB_Up"], df_latest_full["BB_Low"] = compute_bollinger_bands(df_latest_full["Close"])
-                df_latest_full["MACD"], df_latest_full["MACD_Sig"] = compute_macd(df_latest_full["Close"])
+                df_latest_full['RSI'] = compute_rsi(df_latest_full['Close'])
+                df_latest_full['MA20'] = df_latest_full['Close'].rolling(window=20).mean()
+                df_latest_full['BB_Up'], df_latest_full['BB_Low'] = compute_bollinger_bands(df_latest_full['Close'])
+                df_latest_full['MACD'], df_latest_full['MACD_Sig'] = compute_macd(df_latest_full['Close'])
                 
-                df_latest_full["Stoch_K"], df_latest_full["Stoch_D"] = compute_stochastic_oscillator(df_latest_full["High"], df_latest_full["Low"], df_latest_full["Close"])
-                df_latest_full["ATR"] = compute_atr(df_latest_full["High"], df_latest_full["Low"], df_latest_full["Close"])
-                df_latest_full["ROC"] = compute_roc(df_latest_full["Close"])
+                df_latest_full['Stoch_K'], df_latest_full['Stoch_D'] = compute_stochastic_oscillator(df_latest_full['High'], df_latest_full['Low'], df_latest_full['Close'])
+                df_latest_full['ATR'] = compute_atr(df_latest_full['High'], df_latest_full['Low'], df_latest_full['Close'])
+                df_latest_full['ROC'] = compute_roc(df_latest_full['Close'])
 
-                df_latest_full["Close_Lag1"] = df_latest_full["Close"].shift(1)
-                df_latest_full["RSI_Lag1"] = df_latest_full["RSI"].shift(1)
-                df_latest_full["MACD_Lag1"] = df_latest_full["MACD"].shift(1)
-                df_latest_full["Stoch_K_Lag1"] = df_latest_full["Stoch_K"].shift(1)
-                df_latest_full["ATR_Lag1"] = df_latest_full["ATR"].shift(1)
-                df_latest_full["ROC_Lag1"] = df_latest_full["ROC"].shift(1)
+                df_latest_full['Close_Lag1'] = df_latest_full['Close'].shift(1)
+                df_latest_full['RSI_Lag1'] = df_latest_full['RSI'].shift(1)
+                df_latest_full['MACD_Lag1'] = df_latest_full['MACD'].shift(1)
+                df_latest_full['Stoch_K_Lag1'] = df_latest_full['Stoch_K'].shift(1)
+                df_latest_full['ATR_Lag1'] = df_latest_full['ATR'].shift(1)
+                df_latest_full['ROC_Lag1'] = df_latest_full['ROC'].shift(1)
 
-                df_latest_full["Hour"] = df_latest_full.index.hour
-                df_latest_full["DayOfWeek"] = df_latest_full.index.dayofweek
-                df_latest_full["DayOfMonth"] = df_latest_full.index.day
-                df_latest_full["Month"] = df_latest_full.index.month
+                df_latest_full['Hour'] = df_latest_full.index.hour
+                df_latest_full['DayOfWeek'] = df_latest_full.index.dayofweek
+                df_latest_full['DayOfMonth'] = df_latest_full.index.day
+                df_latest_full['Month'] = df_latest_full.index.month
 
-                df_latest_full["PriceChange"] = df_latest_full["Close"].pct_change()
-                df_latest_full = df_latest_full[df_latest_full["PriceChange"].abs() < 0.1]
+                df_latest_full['PriceChange'] = df_latest_full['Close'].pct_change()
+                df_latest_full = df_latest_full[df_latest_full['PriceChange'].abs() < 0.1]
                 df_latest_full = df_latest_full.dropna()
 
                 if len(df_latest_full) >= 1:
                     feature_columns = [
-                        "Open", "High", "Low", "Close", 
-                        "RSI", "MA20", "BB_Up", "BB_Low", "MACD", "MACD_Sig",
-                        "Stoch_K", "Stoch_D", "ATR", "ROC",
-                        "Close_Lag1", "RSI_Lag1", "MACD_Lag1", "Stoch_K_Lag1", "ATR_Lag1", "ROC_Lag1",
-                        "Hour", "DayOfWeek", "DayOfMonth", "Month"
+                        'Open', 'High', 'Low', 'Close', 
+                        'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
+                        'Stoch_K', 'Stoch_D', 'ATR', 'ROC',
+                        'Close_Lag1', 'RSI_Lag1', 'MACD_Lag1', 'Stoch_K_Lag1', 'ATR_Lag1', 'ROC_Lag1',
+                        'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
                     ]
                     latest_features_raw = df_latest_full[feature_columns].iloc[-1:]
                     latest_features_scaled = scaler.transform(latest_features_raw)
