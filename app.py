@@ -82,7 +82,8 @@ def compute_roc(data, period=12):
 
 # --- Пользовательская метрика F1-score для LightGBM ---
 def lgbm_f1_score(y_pred, y_true):
-    y_true = y_true.get_label()
+    # y_true уже является массивом numpy, поэтому get_label() не нужен
+    y_true = y_true # Оставляем y_true как есть
     y_pred_binary = (y_pred > 0.5).astype(int) # Преобразуем вероятности в бинарные предсказания
     return 'f1_score', f1_score(y_true, y_pred_binary, average='weighted'), True # True означает, что чем выше, тем лучше
 
