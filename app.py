@@ -80,6 +80,12 @@ def compute_roc(data, period=12):
     roc = ((data - data.shift(period)) / data.shift(period)) * 100
     return roc
 
+# --- Пользовательская метрика F1-score для LightGBM ---
+def lgbm_f1_score(y_pred, y_true):
+    y_true = y_true.get_label()
+    y_pred_binary = (y_pred > 0.5).astype(int) # Преобразуем вероятности в бинарные предсказания
+    return 'f1_score', f1_score(y_true, y_pred_binary, average='weighted'), True # True означает, что чем выше, тем лучше
+
 def prepare_data():
     logger.info("Downloading data...")
     try:
@@ -187,7 +193,7 @@ def train_model():
     def objective(trial):
         params = {
             'objective': 'binary',
-            'metric': 'binary_logloss',
+            'metric': 'binary_logloss', # Основная метрика для обучения LightGBM
             'n_estimators': trial.suggest_int('n_estimators', 50, 500),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
             'num_leaves': trial.suggest_int('num_leaves', 20, 100),
@@ -214,8 +220,8 @@ def train_model():
 
             model.fit(X_fold_train, y_fold_train,
                       eval_set=[(X_fold_val, y_fold_val)],
-                      eval_metric='binary_logloss',
-                      callbacks=[optuna.integration.LightGBMPruningCallback(trial, "binary_logloss", direction="minimize")] # ИСПРАВЛЕНО
+                      eval_metric=lgbm_f1_score, # Используем пользовательскую метрику F1-score
+                      callbacks=[optuna.integration.LightGBMPruningCallback(trial, "f1_score")] # Отслеживаем 'f1_score' для прунинга
                      )
             
             y_pred_val = model.predict(X_fold_val)
