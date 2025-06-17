@@ -199,103 +199,78 @@ def calculate_indicators(df):
 def prepare_data():
     end_date = datetime.now()
 
-    # --- 1. Загрузка данных для разных таймфреймов ---
+    # --- 1. Загрузка данных для основных таймфреймов ---
     df_15m = download_and_process_data("15m", LOOKBACK_PERIOD, end_date)
     if df_15m is None or df_15m.empty:
         raise ValueError("Failed to download or process 15m data.")
     logger.info(f"Downloaded {len(df_15m)} rows for 15m interval.")
 
-    df_1h = download_and_process_data("1h", "1y", end_date)
-    df_4h = download_and_process_data("4h", "2y", end_date)
-    df_1d = download_and_process_data("1d", "5y", end_date)
+    # Оставляем только 1-часовые данные для многотаймфреймового анализа
+    df_1h = download_and_process_data("1h", "1y", end_date) # 1 год для 1-часовых данных
 
     # --- 2. Расчет индикаторов для каждого таймфрейма ---
     df_15m_features = calculate_indicators(df_15m)
     df_1h_features = calculate_indicators(df_1h)
-    df_4h_features = calculate_indicators(df_4h)
-    df_1d_features = calculate_indicators(df_1d)
+    # df_4h_features = calculate_indicators(df_4h) # УДАЛЕНО
+    # df_1d_features = calculate_indicators(df_1d) # УДАЛЕНО
 
     # --- 3. Объединение признаков разных таймфреймов ---
-    # ИЗМЕНЕНИЕ: Создаем список DataFrames для конкатенации вместо поэтапного добавления колонок
     df_list = [df_15m_features]
 
     indicators_to_merge = ["RSI", "MA20", "BB_Up", "BB_Low", "MACD", "MACD_Sig",
                            "Stoch_K", "Stoch_D", "ATR", "ROC", "ADX", "PSAR"]
 
-    # Resample and add multi-timeframe indicators
+    # Resample and add multi-timeframe indicators (только для 1h)
     if df_1h_features is not None and not df_1h_features.empty:
         for ind in indicators_to_merge:
             if ind in df_1h_features.columns:
-                # Создаем новый DataFrame для каждого индикатора и переименовываем колонку
                 resampled_df = df_1h_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_1h"})
                 df_list.append(resampled_df)
     
-    if df_4h_features is not None and not df_4h_features.empty:
-        for ind in indicators_to_merge:
-            if ind in df_4h_features.columns:
-                resampled_df = df_4h_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_4h"})
-                df_list.append(resampled_df)
+    # УДАЛЕНО: Блоки для df_4h_features и df_1d_features
 
-    if df_1d_features is not None and not df_1d_features.empty:
-        for ind in indicators_to_merge:
-            if ind in df_1d_features.columns:
-                resampled_df = df_1d_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_1d"})
-                df_list.append(resampled_df)
-
-    # ИЗМЕНЕНИЕ: Конкатенируем все DataFrames с индикаторами
     df_combined = pd.concat(df_list, axis=1)
-    # Убедимся, что индекс уникален и отсортирован после конкатенации и ресэмплинга
     df_combined = df_combined[~df_combined.index.duplicated(keep='first')]
     df_combined = df_combined.sort_index()
 
     # --- 4. Добавление лагированных признаков ---
     lag_periods = [1, 2, 3, 4]
-    # ИЗМЕНЕНИЕ: Создаем отдельный DataFrame для лагированных признаков
     lagged_features_df = pd.DataFrame(index=df_combined.index)
 
-    # Определяем все колонки, которые являются кандидатами для лагирования
-    # Включаем все текущие колонки df_combined, кроме тех, что не являются признаками
     cols_to_lag = [col for col in df_combined.columns if col not in ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"]]
-    cols_to_lag.extend(["Close"]) # Добавляем 'Close' для лагирования, если его нет
+    cols_to_lag.extend(["Close"])
 
-    for col in set(cols_to_lag): # Используем set, чтобы избежать дубликатов
-        if col in df_combined.columns: # Проверяем, что колонка существует в df_combined
+    for col in set(cols_to_lag):
+        if col in df_combined.columns:
             for lag in lag_periods:
                 lagged_features_df[f"{col}_Lag{lag}"] = df_combined[col].shift(lag)
     
-    # ИЗМЕНЕНИЕ: Конкатенируем лагированные признаки с основным DataFrame
     df_combined = pd.concat([df_combined, lagged_features_df], axis=1)
 
     # --- 5. Добавление временных признаков ---
-    # ИЗМЕНЕНИЕ: Создаем отдельный DataFrame для временных признаков
     time_features_df = pd.DataFrame(index=df_combined.index)
     time_features_df["Hour"] = df_combined.index.hour
     time_features_df["DayOfWeek"] = df_combined.index.dayofweek
     time_features_df["DayOfMonth"] = df_combined.index.day
     time_features_df["Month"] = df_combined.index.month
-    # ИЗМЕНЕНИЕ: Конкатенируем временные признаки с основным DataFrame
     df_combined = pd.concat([df_combined, time_features_df], axis=1)
 
     # --- 6. Определение целевой переменной ---
     df_combined["Target_Raw"] = df_combined["Close"].shift(-HORIZON_PERIODS)
     
-    # Целевая переменная с порогом: 1 если цена вырастет на TARGET_PRICE_CHANGE_THRESHOLD, 0 если упадет на TARGET_PRICE_CHANGE_THRESHOLD, иначе NaN
-    # Это сделает задачу сложнее, но сигналы будут более значимыми.
-    # Затем NaN будут удалены, что оставит только "значимые" движения.
     df_combined["Target"] = np.nan
     df_combined.loc[df_combined["Target_Raw"] > df_combined["Close"] * (1 + TARGET_PRICE_CHANGE_THRESHOLD), "Target"] = 1
     df_combined.loc[df_combined["Target_Raw"] < df_combined["Close"] * (1 - TARGET_PRICE_CHANGE_THRESHOLD), "Target"] = 0
 
     # --- 7. Очистка данных ---
     df_combined["PriceChange"] = df_combined["Close"].pct_change()
-    df_combined = df_combined[df_combined["PriceChange"].abs() < 0.1] # Удаляем экстремальные изменения
+    df_combined = df_combined[df_combined["PriceChange"].abs() < 0.1]
     
     initial_rows = len(df_combined)
-    # ИЗМЕНЕНИЕ: Логируем количество NaN в целевой переменной перед удалением
     nan_in_target = df_combined["Target"].isna().sum()
     logger.info(f"Rows with NaN in Target before dropna: {nan_in_target}")
 
-    df_combined = df_combined.dropna() # Удаляем все строки с NaN (из-за индикаторов, лагов, таргета)
+    df_combined = df_combined.dropna()
     logger.info(f"After dropna: {len(df_combined)} rows (dropped {initial_rows - len(df_combined)})")
 
     if len(df_combined) < MIN_DATA_ROWS:
@@ -303,29 +278,27 @@ def prepare_data():
         raise ValueError(f"Insufficient data: {len(df_combined)} rows, required at least {MIN_DATA_ROWS}.")
     
     # --- 8. Подготовка X и y ---
-    # Исключаем колонки, которые не являются признаками
     exclude_cols = ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits", 
                     "Target_Raw", "Target", "PriceChange"]
     
     feature_columns = [col for col in df_combined.columns if col not in exclude_cols and not col.startswith("Adj Close")]
     
-    # Добавляем обратно Open, High, Low, Close, если они не были исключены ранее
-    # (они могут быть полезны как сырые признаки)
     for basic_col in ["Open", "High", "Low", "Close"]:
         if basic_col in df_combined.columns and basic_col not in feature_columns:
             feature_columns.append(basic_col)
 
     X_raw = df_combined[feature_columns]
-    y_raw = df_combined["Target"].astype(int) # Убедимся, что таргет int
+    y_raw = df_combined["Target"].astype(int)
 
-    X_raw = X_raw.replace([np.inf, -np.inf], np.nan).ffill().bfill() # Финальная очистка от inf
+    X_raw = X_raw.replace([np.inf, -np.inf], np.nan).ffill().bfill()
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
     X_scaled_df = pd.DataFrame(X_scaled, columns=X_raw.columns, index=X_raw.index)
 
     logger.info(f"X shape: {X_scaled_df.shape}, y shape: {y_raw.shape}, y distribution: {y_raw.value_counts().to_dict()}")
-    return X_scaled_df, y_raw, scaler, df_combined # Возвращаем df_combined для получения последней цены
+    return X_scaled_df, y_raw, scaler, df_combined
+
 
 def train_model():
     try:
@@ -526,58 +499,67 @@ async def root():
                 if df_latest_full_15m is None:
                     raise ValueError("Failed to download 15m data for signal generation.")
 
+                # Оставляем только 1-часовые данные для многотаймфреймового анализа
                 df_latest_full_1h = download_and_process_data("1h", "1y", end_date)
-                df_latest_full_4h = download_and_process_data("4h", "2y", end_date)
-                df_latest_full_1d = download_and_process_data("1d", "5y", end_date)
+                # df_latest_full_4h = download_and_process_data("4h", "2y", end_date) # УДАЛЕНО
+                # df_latest_full_1d = download_and_process_data("1d", "5y", end_date) # УДАЛЕНО
 
                 # Расчет индикаторов для последних данных
                 df_latest_full_15m_features = calculate_indicators(df_latest_full_15m)
                 df_latest_full_1h_features = calculate_indicators(df_latest_full_1h)
-                df_latest_full_4h_features = calculate_indicators(df_latest_full_4h)
-                df_latest_full_1d_features = calculate_indicators(df_latest_full_1d)
+                # df_latest_full_4h_features = calculate_indicators(df_latest_full_4h) # УДАЛЕНО
+                # df_latest_full_1d_features = calculate_indicators(df_latest_full_1d) # УДАЛЕНО
 
-                df_combined_latest = df_latest_full_15m_features.copy()
+                # Создаем список DataFrames для конкатенации для последних данных
+                df_list_latest = [df_latest_full_15m_features]
 
                 indicators_to_merge = ["RSI", "MA20", "BB_Up", "BB_Low", "MACD", "MACD_Sig",
                                        "Stoch_K", "Stoch_D", "ATR", "ROC", "ADX", "PSAR"]
 
-                for ind in indicators_to_merge:
-                    if df_latest_full_1h_features is not None and ind in df_latest_full_1h_features.columns:
-                        df_combined_latest[f"{ind}_1h"] = df_latest_full_1h_features[ind].resample("15min").ffill()
-                    if df_latest_full_4h_features is not None and ind in df_latest_full_4h_features.columns:
-                        df_combined_latest[f"{ind}_4h"] = df_latest_full_4h_features[ind].resample("15min").ffill()
-                    if df_latest_full_1d_features is not None and ind in df_latest_full_1d_features.columns:
-                        df_combined_latest[f"{ind}_1d"] = df_latest_full_1d_features[ind].resample("15min").ffill()
+                if df_latest_full_1h_features is not None and not df_latest_full_1h_features.empty:
+                    for ind in indicators_to_merge:
+                        if ind in df_latest_full_1h_features.columns:
+                            resampled_df = df_latest_full_1h_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_1h"})
+                            df_list_latest.append(resampled_df)
+                
+                # УДАЛЕНО: Блоки для df_latest_full_4h_features и df_latest_full_1d_features
+
+                df_combined_latest = pd.concat(df_list_latest, axis=1)
+                df_combined_latest = df_combined_latest[~df_combined_latest.index.duplicated(keep='first')]
+                df_combined_latest = df_combined_latest.sort_index()
 
                 # Добавление лагированных признаков для последних данных
                 lag_periods = [1, 2, 3, 4]
-                for col in ["Close", "RSI", "MACD", "Stoch_K", "ATR", "ROC", "ADX", "PSAR"]:
+                lagged_features_df_latest = pd.DataFrame(index=df_combined_latest.index)
+
+                cols_to_lag_latest = [col for col in df_combined_latest.columns if col not in ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"]]
+                cols_to_lag_latest.extend(["Close"])
+
+                for col in set(cols_to_lag_latest):
                     if col in df_combined_latest.columns:
                         for lag in lag_periods:
-                            df_combined_latest[f"{col}_Lag{lag}"] = df_combined_latest[col].shift(lag)
-                    for tf_suffix in ["_1h", "_4h", "_1d"]:
-                        if f"{col}{tf_suffix}" in df_combined_latest.columns:
-                            for lag in lag_periods:
-                                df_combined_latest[f"{col}{tf_suffix}_Lag{lag}"] = df_combined_latest[f"{col}{tf_suffix}"].shift(lag)
+                            lagged_features_df_latest[f"{col}_Lag{lag}"] = df_combined_latest[col].shift(lag)
+                
+                df_combined_latest = pd.concat([df_combined_latest, lagged_features_df_latest], axis=1)
 
                 # Добавление временных признаков для последних данных
-                df_combined_latest["Hour"] = df_combined_latest.index.hour
-                df_combined_latest["DayOfWeek"] = df_combined_latest.index.dayofweek
-                df_combined_latest["DayOfMonth"] = df_combined_latest.index.day
-                df_combined_latest["Month"] = df_combined_latest.index.month
+                time_features_df_latest = pd.DataFrame(index=df_combined_latest.index)
+                time_features_df_latest["Hour"] = df_combined_latest.index.hour
+                time_features_df_latest["DayOfWeek"] = df_combined_latest.index.dayofweek
+                time_features_df_latest["DayOfMonth"] = df_combined_latest.index.day
+                time_features_df_latest["Month"] = df_combined_latest.index.month
+                df_combined_latest = pd.concat([df_combined_latest, time_features_df_latest], axis=1)
 
                 df_combined_latest["PriceChange"] = df_combined_latest["Close"].pct_change()
                 df_combined_latest = df_combined_latest[df_combined_latest["PriceChange"].abs() < 0.1]
                 df_combined_latest = df_combined_latest.dropna()
 
                 if len(df_combined_latest) >= 1:
-                    # Исключаем колонки, которые не являются признаками (аналогично prepare_data)
                     exclude_cols = ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits",
                                     "Target_Raw", "Target", "PriceChange"]
 
                     feature_columns_latest = [col for col in df_combined_latest.columns if col not in exclude_cols and not col.startswith("Adj Close")]
 
-                    # Добавляем обратно Open, High, Low, Close, если они не были исключены ранее
                     for basic_col in ["Open", "High", "Low", "Close"]:
                         if basic_col in df_combined_latest.columns and basic_col not in feature_columns_latest:
                             feature_columns_latest.append(basic_col)
@@ -585,7 +567,6 @@ async def root():
                     latest_features_raw = df_combined_latest[feature_columns_latest].iloc[-1:]
                     latest_features_raw = latest_features_raw.replace([np.inf, -np.inf], np.nan).ffill().bfill()
 
-                    # Важно: используем тот же scaler, что и при обучении
                     latest_features_scaled = scaler.transform(latest_features_raw)
 
                     latest_original_data_point = df_combined_latest.iloc[-1:]
