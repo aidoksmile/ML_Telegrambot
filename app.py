@@ -82,18 +82,15 @@ def compute_roc(data, period=12):
 
 # --- Пользовательская метрика F1-score для LightGBM ---
 def lgbm_f1_score(y_pred, y_true):
-    # y_true уже является массивом numpy, просто убедимся, что он целочисленный
     y_true_binary = y_true.astype(int)
-    y_pred_binary = (y_pred > 0.5).astype(int) # Преобразуем вероятности в бинарные предсказания
-    return 'f1_score', f1_score(y_true_binary, y_pred_binary, average='weighted'), True # True означает, что чем выше, тем лучше
+    y_pred_binary = (y_pred > 0.5).astype(int)
+    return 'f1_score', f1_score(y_true_binary, y_pred_binary, average='weighted'), True
 
 def prepare_data():
     logger.info("Downloading data...")
     try:
         end_date = datetime.now()
-        # Загрузка 15-минутных данных
         df_15m = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
-        # Загрузка дневных данных за 2 года
         df_1d = yf.download("EURUSD=X", interval="1d", period="2y", end=end_date)
     except Exception as e:
         logger.error(f"Error downloading data: {str(e)}")
@@ -105,12 +102,27 @@ def prepare_data():
     if df_1d.empty:
         logger.warning("Empty 1d data received from Yahoo Finance. Proceeding without daily features.")
 
+    # --- Timezone handling: Ensure both DataFrames have UTC-aware indices ---
+    # Convert 15m data index to UTC if it's not already or is naive
+    if df_15m.index.tz is None:
+        df_15m.index = df_15m.index.tz_localize('UTC')
+    else:
+        df_15m.index = df_15m.index.tz_convert('UTC')
+
+    # Convert 1d data index to UTC if it's not already or is naive
+    if not df_1d.empty:
+        if df_1d.index.tz is None:
+            df_1d.index = df_1d.index.tz_localize('UTC')
+        else:
+            df_1d.index = df_1d.index.tz_convert('UTC')
+    # --- End Timezone handling ---
+
     logger.info(f"Downloaded {len(df_15m)} rows for 15m interval, from {df_15m.index[0]} to {df_15m.index[-1]}.")
     logger.info(f"Downloaded {len(df_1d)} rows for 1d interval, from {df_1d.index[0]} to {df_1d.index[-1]}.")
     
-    # Обработка MultiIndex для 15-минутных данных
     if isinstance(df_15m.columns, pd.MultiIndex):
         df_15m.columns = [col[0] for col in df_15m.columns]
+
     df_15m = df_15m[(df_15m["Close"] > 0) & (df_15m["Open"] > 0)]
     df_15m["Close"] = df_15m["Close"].ffill().bfill()
     df_15m["Target"] = df_15m["Close"].shift(-HORIZON_PERIODS)
@@ -121,7 +133,6 @@ def prepare_data():
 
     df_features = df_15m.copy() 
 
-    # Вычисление индикаторов для 15-минутных данных
     df_features["RSI"] = compute_rsi(df_features["Close"])
     df_features["MA20"] = df_features["Close"].rolling(window=20).mean()
     df_features["BB_Up"], df_features["BB_Low"] = compute_bollinger_bands(df_features["Close"])
@@ -136,7 +147,7 @@ def prepare_data():
     df_features["MACD_Lag1"] = df_features["MACD"].shift(1)
     df_features["Stoch_K_Lag1"] = df_features["Stoch_K"].shift(1)
     df_features["ATR_Lag1"] = df_features["ATR"].shift(1)
-    df_features["ROC_Lag1"] = df_features["ROC"].shift(1)
+    df_features["ROC_Lag1"] = compute_roc(df_features["Close_Lag1"]) # Corrected: ROC_Lag1 should be based on Close_Lag1
 
     df_features["Hour"] = df_features.index.hour
     df_features["DayOfWeek"] = df_features.index.dayofweek
@@ -161,11 +172,11 @@ def prepare_data():
         df_1d_features["ROC_1d"] = compute_roc(df_1d["Close"])
         df_1d_features["Daily_Change"] = df_1d["Close"].pct_change()
 
-        # Переиндексация дневных данных для слияния с 15-минутными
-        # Используем asfreq для создания записей для каждого 15-минутного интервала, затем ffill
+        # Resample daily features to 15min frequency and forward fill
+        # Ensure the index of df_1d_features_resampled is also UTC-aware
         df_1d_features_resampled = df_1d_features.resample('15min').ffill()
         
-        # Объединение данных
+        # Merge 15m data with resampled 1d features
         df_features = df_features.merge(df_1d_features_resampled, left_index=True, right_index=True, how='left')
         logger.info(f"After merging with 1d features: {len(df_features)} rows")
     else:
@@ -189,7 +200,6 @@ def prepare_data():
         "Hour", "DayOfWeek", "DayOfMonth", "Month"
     ]
     
-    # Добавляем новые признаки с дневного таймфрейма, если они были добавлены
     if not df_1d.empty:
         daily_features = ["RSI_1d", "MA20_1d", "MACD_1d", "MACD_Sig_1d", "ATR_1d", "ROC_1d", "Daily_Change"]
         for col in daily_features:
@@ -234,7 +244,7 @@ def train_model():
     def objective(trial):
         params = {
             "objective": "binary",
-            "metric": "binary_logloss", # Основная метрика для обучения LightGBM
+            "metric": "binary_logloss",
             "n_estimators": trial.suggest_int("n_estimators", 50, 500),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 20, 100),
@@ -261,8 +271,8 @@ def train_model():
 
             model.fit(X_fold_train, y_fold_train,
                       eval_set=[(X_fold_val, y_fold_val)],
-                      eval_metric=lgbm_f1_score, # Используем пользовательскую метрику F1-score
-                      callbacks=[optuna.integration.LightGBMPruningCallback(trial, "f1_score")] # Отслеживаем 'f1_score' для прунинга
+                      eval_metric=lgbm_f1_score,
+                      callbacks=[optuna.integration.LightGBMPruningCallback(trial, "f1_score")]
                      )
             
             y_pred_val = model.predict(X_fold_val)
@@ -306,7 +316,7 @@ def train_model():
     logger.info(f"Final model performance on TEST set: Accuracy={test_accuracy:.4f}, F1-score={test_f1_score:.4f}")
 
     joblib.dump(final_model, MODEL_PATH)
-    joblib.dump({'scaler': scaler, 'feature_columns': X.columns.tolist()}, 'scaler_and_features.pkl') # Сохраняем имена признаков
+    joblib.dump({'scaler': scaler, 'feature_columns': X.columns.tolist()}, 'scaler_and_features.pkl')
 
     with open(ACCURACY_PATH, "w") as f:
         json.dump({
@@ -317,10 +327,7 @@ def train_model():
         }, f)
 
     if len(X) > 0:
-        # Для генерации сигнала нам нужны последние сырые данные, чтобы правильно их обработать и масштабировать
-        # и получить текущую цену
         latest_original_data_point = df_original.iloc[-1:]
-        # Передаем последние сырые признаки для масштабирования
         latest_features_raw = X.iloc[-1:] 
         generate_signal(final_model, scaler, latest_features_raw, latest_original_data_point)
     else:
@@ -336,16 +343,12 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
             logger.warning("No latest original data point to get current price.")
             return
 
-        # Загружаем сохраненные имена признаков
         scaler_data = joblib.load('scaler_and_features.pkl')
         saved_feature_columns = scaler_data['feature_columns']
 
-        # Убедимся, что latest_features_raw имеет те же столбцы, что и при обучении
-        # Если какие-то столбцы отсутствуют, заполним их NaN, затем ffill/bfill
         current_features = latest_features_raw.reindex(columns=saved_feature_columns, fill_value=np.nan)
         current_features = current_features.replace([np.inf, -np.inf], np.nan).ffill().bfill()
         
-        # Масштабируем только те признаки, которые были использованы при обучении
         latest_features_scaled = scaler.transform(current_features)
         
         prediction_proba = model.predict_proba(latest_features_scaled)[0]
@@ -421,6 +424,19 @@ async def root():
                 # Загрузка дневных данных для текущего сигнала
                 df_latest_1d = yf.download("EURUSD=X", interval="1d", period="30d", end=end_date) # Несколько дней для индикаторов
                 
+                # --- Timezone handling for live signal generation ---
+                if df_latest_15m.index.tz is None:
+                    df_latest_15m.index = df_latest_15m.index.tz_localize('UTC')
+                else:
+                    df_latest_15m.index = df_latest_15m.index.tz_convert('UTC')
+
+                if not df_latest_1d.empty:
+                    if df_latest_1d.index.tz is None:
+                        df_latest_1d.index = df_latest_1d.index.tz_localize('UTC')
+                    else:
+                        df_latest_1d.index = df_latest_1d.index.tz_convert('UTC')
+                # --- End Timezone handling ---
+
                 if isinstance(df_latest_15m.columns, pd.MultiIndex):
                     df_latest_15m.columns = [col[0] for col in df_latest_15m.columns]
                 df_latest_15m['Close'] = df_latest_15m['Close'].ffill().bfill()
@@ -440,7 +456,7 @@ async def root():
                 df_latest_15m['MACD_Lag1'] = df_latest_15m['MACD'].shift(1)
                 df_latest_15m['Stoch_K_Lag1'] = df_latest_15m['Stoch_K'].shift(1)
                 df_latest_15m['ATR_Lag1'] = df_latest_15m['ATR'].shift(1)
-                df_latest_15m['ROC_Lag1'] = df_latest_15m['ROC'].shift(1)
+                df_latest_15m['ROC_Lag1'] = compute_roc(df_latest_15m['Close_Lag1'])
 
                 df_latest_15m['Hour'] = df_latest_15m.index.hour
                 df_latest_15m['DayOfWeek'] = df_latest_15m.index.dayofweek
@@ -474,6 +490,7 @@ async def root():
 
                 if len(df_latest_15m) >= 1:
                     # Выбираем только те признаки, которые были использованы при обучении модели
+                    # Используем saved_feature_columns для обеспечения правильного порядка и набора признаков
                     latest_features_raw = df_latest_15m[saved_feature_columns].iloc[-1:]
                     latest_original_data_point = df_latest_15m.iloc[-1:]
 
