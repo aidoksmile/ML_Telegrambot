@@ -350,7 +350,7 @@ def objective(trial):
     params = {
         "objective": "binary",
         "metric": "binary_logloss",  # формально нужен, но мы переопределим через feval
-        "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
+        "n_estimators": trial.suggest_int("n_estimators", 50, 300),
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
         "num_leaves": trial.suggest_int("num_leaves", 20, 100),
         "max_depth": trial.suggest_int("max_depth", 3, 10),
@@ -365,10 +365,12 @@ def objective(trial):
         "boosting_type": "gbdt",
         "scale_pos_weight": scale_pos_weight
     }
+    
+    logger.info(f"🚀 Trial #{trial.number} started")
 
     lgb_train = lgb.Dataset(X_train_val, y_train_val)
     folds = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
-
+    start = time.time()
     cv_results = lgb.cv(
         params,
         lgb_train,
@@ -381,7 +383,8 @@ def objective(trial):
             lgb.early_stopping(stopping_rounds=50, verbose=False)
         ]
     )
-
+    logger.info(f"✅ Trial #{trial.number} finished. F1={avg_f1:.4f}")
+    logger.info(f"⏱ cv_results time: {time.time() - start:.2f} seconds")
     try:
         avg_f1 = cv_results['valid f1_score-mean'][-1]
     except KeyError:
