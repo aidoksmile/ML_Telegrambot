@@ -355,6 +355,14 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
         
         current_price = latest_original_data_point['Close'].iloc[0] 
         
+        # --- Получение значений индикаторов для расчета SL/TP ---
+        # Убедимся, что эти столбцы существуют в latest_features_raw
+        # (они должны быть, если были в feature_columns при обучении)
+        current_atr = latest_features_raw['ATR'].iloc[0]
+        bb_up = latest_features_raw['BB_Up'].iloc[0]
+        bb_low = latest_features_raw['BB_Low'].iloc[0]
+        # --- Конец получения индикаторов ---
+
         signal_type = "HOLD"
         stop_loss = None
         take_profit = None
@@ -364,12 +372,37 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
 
         if buy_probability >= PREDICTION_PROB_THRESHOLD:
             signal_type = "BUY"
-            stop_loss = current_price * 0.99
-            take_profit = current_price * 1.015
+            # Расчет Stop Loss для BUY:
+            # 1. Структурный SL: чуть ниже нижней полосы Боллинджера
+            structural_sl = bb_low - (current_price * BB_BUFFER_FACTOR)
+            # 2. Минимальный SL по ATR:
+            atr_sl = current_price - (MIN_ATR_SL_MULTIPLIER * current_atr)
+            # Выбираем наименьшее значение (дальше от текущей цены)
+            stop_loss = min(structural_sl, atr_sl)
+            
+            # Убедимся, что SL не выше текущей цены
+            stop_loss = min(stop_loss, current_price * 0.999) # Небольшой буфер от текущей цены
+
+            # Расчет Take Profit для BUY на основе Risk/Reward
+            risk_amount = current_price - stop_loss
+            take_profit = current_price + (risk_amount * RISK_REWARD_RATIO)
+
         elif sell_probability >= PREDICTION_PROB_THRESHOLD:
             signal_type = "SELL"
-            stop_loss = current_price * 1.01
-            take_profit = current_price * 0.985
+            # Расчет Stop Loss для SELL:
+            # 1. Структурный SL: чуть выше верхней полосы Боллинджера
+            structural_sl = bb_up + (current_price * BB_BUFFER_FACTOR)
+            # 2. Минимальный SL по ATR:
+            atr_sl = current_price + (MIN_ATR_SL_MULTIPLIER * current_atr)
+            # Выбираем наибольшее значение (дальше от текущей цены)
+            stop_loss = max(structural_sl, atr_sl)
+
+            # Убедимся, что SL не ниже текущей цены
+            stop_loss = max(stop_loss, current_price * 1.001) # Небольшой буфер от текущей цены
+
+            # Расчет Take Profit для SELL на основе Risk/Reward
+            risk_amount = stop_loss - current_price
+            take_profit = current_price - (risk_amount * RISK_REWARD_RATIO)
         
         signal = {
             "time": str(datetime.now()),
@@ -394,6 +427,7 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
         send_telegram_message(msg)
     except Exception as e:
         logger.error(f"Signal generation error: {e}")
+
 
 @app.get("/")
 async def root():
