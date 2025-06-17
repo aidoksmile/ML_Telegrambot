@@ -355,7 +355,7 @@ def objective(trial):
             return_cvbooster=False,
             callbacks=[
                 lgb.early_stopping(stopping_rounds=50, verbose=False),
-                optuna.integration.LightGBMPruningCallback(trial, "cv_agg f1_score") # Исправлено на "valid f1_score"
+                optuna.integration.LightGBMPruningCallback(trial, "valid f1_score") # Исправлено на "valid f1_score"
             ]
         )
         logger.info(f"Trial #{trial.number}: LightGBM CV completed.") # НОВЫЙ ЛОГ
