@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 from threading import Thread
-from app.predictor.train import train_model
 
 @app.on_event("startup")
 def startup_event():
