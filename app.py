@@ -352,14 +352,15 @@ def train_model():
             folds=folds,
             callbacks=[
                 lgb.early_stopping(stopping_rounds=50, verbose=False),
-                optuna.integration.LightGBMPruningCallback(trial, "f1_score-mean") 
+                optuna.integration.LightGBMPruningCallback(trial, "valid f1_score-mean")
+
             ],
             feval=lgbm_f1_score_for_cv,
             stratified=False,
             return_cvbooster=False
         )
         
-        avg_f1 = cv_results['f1_score-mean'][-1]
+        avg_f1 = cv_results['valid f1_score-mean'][-1]
         
         return avg_f1
 
