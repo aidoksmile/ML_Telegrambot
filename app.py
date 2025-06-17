@@ -170,10 +170,16 @@ def download_and_process_data(interval, period, end_date):
             df.columns = [col[0] for col in df.columns]
         df = df[(df["Close"] > 0) & (df["Open"] > 0)]
         df["Close"] = df["Close"].ffill().bfill()
+
+        # НОВОЕ: Убедимся, что индекс всегда timezone-naive
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None) # Удаляем информацию о часовом поясе
+
         return df
     except Exception as e:
         logger.error(f"Error downloading data for interval {interval}: {str(e)}")
         return None
+
 
 def calculate_indicators(df):
     if df is None or df.empty:
