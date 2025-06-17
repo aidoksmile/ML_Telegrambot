@@ -26,7 +26,7 @@ warnings.filterwarnings("ignore", message="The reported value is ignored because
 warnings.filterwarnings("ignore", category=FutureWarning)
 # Игнорировать UserWarning от LightGBM, связанные с np.ndarray subset
 warnings.filterwarnings("ignore", message="Usage of np.ndarray subset \(sliced data\) is not recommended due to it will double the peak memory cost in LightGBM.", category=UserWarning)
-
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 # --- Настройка логирования ---
 logging.basicConfig(level=config.LOG_LEVEL, format="""%(asctime)s - %(levelname)s - %(message)s""")
@@ -199,10 +199,9 @@ def prepare_data():
         raise ValueError("Failed to download or process 15m data.")
     logger.info(f"Downloaded {len(df_15m)} rows for 15m interval.")
 
-    # Для более крупных таймфреймов можно запросить больший период
-    df_1h = download_and_process_data("1h", "1y", end_date) # 1 год для 1-часовых данных
-    df_4h = download_and_process_data("4h", "2y", end_date) # 2 года для 4-часовых данных
-    df_1d = download_and_process_data("1d", "5y", end_date) # 5 лет для 1-дневных данных
+    df_1h = download_and_process_data("1h", "1y", end_date)
+    df_4h = download_and_process_data("4h", "2y", end_date)
+    df_1d = download_and_process_data("1d", "5y", end_date)
 
     # --- 2. Расчет индикаторов для каждого таймфрейма ---
     df_15m_features = calculate_indicators(df_15m)
@@ -211,38 +210,65 @@ def prepare_data():
     df_1d_features = calculate_indicators(df_1d)
 
     # --- 3. Объединение признаков разных таймфреймов ---
-    df_combined = df_15m_features.copy()
+    # ИЗМЕНЕНИЕ: Создаем список DataFrames для конкатенации вместо поэтапного добавления колонок
+    df_list = [df_15m_features]
 
-    # Список индикаторов для объединения
     indicators_to_merge = ["RSI", "MA20", "BB_Up", "BB_Low", "MACD", "MACD_Sig",
                            "Stoch_K", "Stoch_D", "ATR", "ROC", "ADX", "PSAR"]
 
-    for ind in indicators_to_merge:
-        if df_1h_features is not None and ind in df_1h_features.columns:
-            df_combined[f"{ind}_1h"] = df_1h_features[ind].resample("15min").ffill()
-        if df_4h_features is not None and ind in df_4h_features.columns:
-            df_combined[f"{ind}_4h"] = df_4h_features[ind].resample("15min").ffill()
-        if df_1d_features is not None and ind in df_1d_features.columns:
-            df_combined[f"{ind}_1d"] = df_1d_features[ind].resample("15min").ffill()
+    # Resample and add multi-timeframe indicators
+    if df_1h_features is not None and not df_1h_features.empty:
+        for ind in indicators_to_merge:
+            if ind in df_1h_features.columns:
+                # Создаем новый DataFrame для каждого индикатора и переименовываем колонку
+                resampled_df = df_1h_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_1h"})
+                df_list.append(resampled_df)
+    
+    if df_4h_features is not None and not df_4h_features.empty:
+        for ind in indicators_to_merge:
+            if ind in df_4h_features.columns:
+                resampled_df = df_4h_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_4h"})
+                df_list.append(resampled_df)
+
+    if df_1d_features is not None and not df_1d_features.empty:
+        for ind in indicators_to_merge:
+            if ind in df_1d_features.columns:
+                resampled_df = df_1d_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_1d"})
+                df_list.append(resampled_df)
+
+    # ИЗМЕНЕНИЕ: Конкатенируем все DataFrames с индикаторами
+    df_combined = pd.concat(df_list, axis=1)
+    # Убедимся, что индекс уникален и отсортирован после конкатенации и ресэмплинга
+    df_combined = df_combined[~df_combined.index.duplicated(keep='first')]
+    df_combined = df_combined.sort_index()
 
     # --- 4. Добавление лагированных признаков ---
-    lag_periods = [1, 2, 3, 4] # Лаги для 15м, 30м, 45м, 1ч назад
-    # Для основных признаков 15m
-    for col in ["Close", "RSI", "MACD", "Stoch_K", "ATR", "ROC", "ADX", "PSAR"]:
-        if col in df_combined.columns:
+    lag_periods = [1, 2, 3, 4]
+    # ИЗМЕНЕНИЕ: Создаем отдельный DataFrame для лагированных признаков
+    lagged_features_df = pd.DataFrame(index=df_combined.index)
+
+    # Определяем все колонки, которые являются кандидатами для лагирования
+    # Включаем все текущие колонки df_combined, кроме тех, что не являются признаками
+    cols_to_lag = [col for col in df_combined.columns if col not in ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"]]
+    cols_to_lag.extend(["Close"]) # Добавляем 'Close' для лагирования, если его нет
+
+    for col in set(cols_to_lag): # Используем set, чтобы избежать дубликатов
+        if col in df_combined.columns: # Проверяем, что колонка существует в df_combined
             for lag in lag_periods:
-                df_combined[f"{col}_Lag{lag}"] = df_combined[col].shift(lag)
-        # Добавляем лаги для многотаймфреймовых признаков
-        for tf_suffix in ["_1h", "_4h", "_1d"]:
-            if f"{col}{tf_suffix}" in df_combined.columns:
-                for lag in lag_periods:
-                    df_combined[f"{col}{tf_suffix}_Lag{lag}"] = df_combined[f"{col}{tf_suffix}"].shift(lag)
+                lagged_features_df[f"{col}_Lag{lag}"] = df_combined[col].shift(lag)
+    
+    # ИЗМЕНЕНИЕ: Конкатенируем лагированные признаки с основным DataFrame
+    df_combined = pd.concat([df_combined, lagged_features_df], axis=1)
 
     # --- 5. Добавление временных признаков ---
-    df_combined["Hour"] = df_combined.index.hour
-    df_combined["DayOfWeek"] = df_combined.index.dayofweek
-    df_combined["DayOfMonth"] = df_combined.index.day
-    df_combined["Month"] = df_combined.index.month
+    # ИЗМЕНЕНИЕ: Создаем отдельный DataFrame для временных признаков
+    time_features_df = pd.DataFrame(index=df_combined.index)
+    time_features_df["Hour"] = df_combined.index.hour
+    time_features_df["DayOfWeek"] = df_combined.index.dayofweek
+    time_features_df["DayOfMonth"] = df_combined.index.day
+    time_features_df["Month"] = df_combined.index.month
+    # ИЗМЕНЕНИЕ: Конкатенируем временные признаки с основным DataFrame
+    df_combined = pd.concat([df_combined, time_features_df], axis=1)
 
     # --- 6. Определение целевой переменной ---
     df_combined["Target_Raw"] = df_combined["Close"].shift(-HORIZON_PERIODS)
@@ -259,6 +285,10 @@ def prepare_data():
     df_combined = df_combined[df_combined["PriceChange"].abs() < 0.1] # Удаляем экстремальные изменения
     
     initial_rows = len(df_combined)
+    # ИЗМЕНЕНИЕ: Логируем количество NaN в целевой переменной перед удалением
+    nan_in_target = df_combined["Target"].isna().sum()
+    logger.info(f"Rows with NaN in Target before dropna: {nan_in_target}")
+
     df_combined = df_combined.dropna() # Удаляем все строки с NaN (из-за индикаторов, лагов, таргета)
     logger.info(f"After dropna: {len(df_combined)} rows (dropped {initial_rows - len(df_combined)})")
 
