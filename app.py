@@ -355,14 +355,14 @@ def objective(trial):
             return_cvbooster=False,
             callbacks=[
                 lgb.early_stopping(stopping_rounds=50, verbose=False),
-                optuna.integration.LightGBMPruningCallback(trial, "valid f1_score") # Исправлено на "valid f1_score"
+                optuna.integration.LightGBMPruningCallback(trial, "cv_agg f1_score") # Исправлено на "valid f1_score"
             ]
         )
         logger.info(f"Trial #{trial.number}: LightGBM CV completed.") # НОВЫЙ ЛОГ
         logger.info(f"⏱ Trial #{trial.number} CV time: {time.time() - start_cv_time:.2f} seconds") # НОВЫЙ ЛОГ
 
         try:
-            avg_f1 = cv_results['valid f1_score-mean'][-1]
+            avg_f1 = cv_results['cv_agg f1_score-mean'][-1]
         except KeyError:
             # Fallback, если имя метрики отличается (хотя после исправлений не должно быть)
             avg_f1 = cv_results['cv_agg f1_score-mean'][-1] 
