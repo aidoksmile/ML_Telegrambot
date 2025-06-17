@@ -509,6 +509,7 @@ async def root():
                     if df_latest_full_1h_features is not None and ind in df_latest_full_1h_features.columns:
                         df_combined_latest[f"{ind}_1h"] = df_latest_full_1h_features[ind].resample("15min").ffill()
                     if df_latest_full_4h_features is not None and ind in df_latest_full_4h_features.columns:
+                        df_combined_latest[f"{ind}_4h"] = df_latest_full_4h_features[ind].resample("15min").ffill()
                     if df_latest_full_1d_features is not None and ind in df_latest_full_1d_features.columns:
                         df_combined_latest[f"{ind}_1d"] = df_latest_full_1d_features[ind].resample("15min").ffill()
 
