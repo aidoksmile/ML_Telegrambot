@@ -317,16 +317,17 @@ y_train_val = None
 scale_pos_weight = 1.0
 
 def objective(trial):
-    global X_train_val, y_train_val, scale_pos_weight # Объявляем, что используем глобальные переменные
+    global X_train_val, y_train_val, scale_pos_weight
 
-    logger.info(f"🚀 Trial #{trial.number} started") # НОВЫЙ ЛОГ
+    logger.info(f"🚀 Trial #{trial.number} started")
+
     params = {
         "objective": "binary",
-        "metric": "binary_logloss",  # формально нужен, но мы переопределим через feval
-        "n_estimators": trial.suggest_int("n_estimators", 50, 300), # Уменьшен верхний предел
+        "metric": "binary_logloss",
+        "n_estimators": trial.suggest_int("n_estimators", 50, 300),
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-        "num_leaves": trial.suggest_int("num_leaves", 10, 50), # Уменьшен диапазон
-        "max_depth": trial.suggest_int("max_depth", 3, 7), # Уменьшен диапазон
+        "num_leaves": trial.suggest_int("num_leaves", 10, 50),
+        "max_depth": trial.suggest_int("max_depth", 3, 7),
         "min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
@@ -338,11 +339,12 @@ def objective(trial):
         "boosting_type": "gbdt",
         "scale_pos_weight": scale_pos_weight
     }
-    
+
     lgb_train = lgb.Dataset(X_train_val, y_train_val)
-    folds = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV) # N_SPLITS_TS_CV из config.py
-    
-    logger.info(f"Trial #{trial.number}: Starting LightGBM CV with {params['n_estimators']} estimators and {N_SPLITS_TS_CV} folds...") # НОВЫЙ ЛОГ
+    folds = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
+
+    logger.info(f"Trial #{trial.number}: Starting LightGBM CV with {params['n_estimators']} estimators and {N_SPLITS_TS_CV} folds...")
+
     start_cv_time = time.time()
     try:
         cv_results = lgb.cv(
@@ -354,22 +356,21 @@ def objective(trial):
             stratified=False,
             return_cvbooster=False,
             callbacks=[
-                lgb.early_stopping(stopping_rounds=50, verbose=False),
-                optuna.integration.LightGBMPruningCallback(trial, "valid f1_score") # Исправлено на "valid f1_score"
+                lgb.early_stopping(stopping_rounds=50, verbose=False)
             ]
         )
-        logger.info(f"Trial #{trial.number}: LightGBM CV completed.") # НОВЫЙ ЛОГ
-        logger.info(f"⏱ Trial #{trial.number} CV time: {time.time() - start_cv_time:.2f} seconds") # НОВЫЙ ЛОГ
 
-        try:
-            avg_f1 = cv_results['cv_agg f1_score-mean'][-1]
-        except KeyError:
-            # Fallback, если имя метрики отличается (хотя после исправлений не должно быть)
-            avg_f1 = cv_results['cv_agg f1_score-mean'][-1] 
-            logger.warning(f"Trial #{trial.number}: Used fallback metric name for F1-score.")
-            
-        logger.info(f"Trial #{trial.number}: Average F1-score = {avg_f1:.4f}") # НОВЫЙ ЛОГ
-        
+        logger.info(f"Trial #{trial.number}: LightGBM CV completed.")
+        logger.info(f"⏱ Trial #{trial.number} CV time: {time.time() - start_cv_time:.2f} seconds")
+
+        avg_f1 = cv_results['cv_agg f1_score-mean'][-1]
+        logger.info(f"Trial #{trial.number}: Average F1-score = {avg_f1:.4f}")
+
+        # Простой прунинг без LightGBM callback
+        trial.report(avg_f1, step=0)
+        if trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
+
         return avg_f1
 
     except Exception as e:
