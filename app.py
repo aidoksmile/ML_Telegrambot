@@ -159,26 +159,38 @@ def lgbm_f1_score_for_cv(preds, train_data):
     y_pred_binary = (preds > 0.5).astype(int)
     return 'f1_score', f1_score(labels, y_pred_binary, average='weighted'), True
 
-def download_and_process_data(interval, period, end_date):
+import time # Убедитесь, что time импортирован в начале файла
+
+def download_and_process_data(interval, period, end_date, max_retries=5, initial_delay=5):
     logger.info(f"Downloading data for interval {interval} with period {period}...")
-    try:
-        df = yf.download("EURUSD=X", interval=interval, period=period, end=end_date)
-        if df.empty:
-            logger.warning(f"Empty data received for interval {interval}.")
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [col[0] for col in df.columns]
-        df = df[(df["Close"] > 0) & (df["Open"] > 0)]
-        df["Close"] = df["Close"].ffill().bfill()
+    for attempt in range(max_retries):
+        try:
+            df = yf.download("EURUSD=X", interval=interval, period=period, end=end_date)
+            if df.empty:
+                logger.warning(f"Empty data received for interval {interval}. No data to process.")
+                # Если данные пустые, это может быть не из-за лимита, а просто нет данных.
+                # В этом случае не имеет смысла повторять, просто возвращаем None.
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [col[0] for col in df.columns]
+            df = df[(df["Close"] > 0) & (df["Open"] > 0)]
+            df["Close"] = df["Close"].ffill().bfill()
 
-        # НОВОЕ: Убедимся, что индекс всегда timezone-naive
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None) # Удаляем информацию о часовом поясе
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
 
-        return df
-    except Exception as e:
-        logger.error(f"Error downloading data for interval {interval}: {str(e)}")
-        return None
+            return df
+        except Exception as e:
+            # Проверяем, является ли ошибка связана с лимитом запросов
+            if "Rate limited" in str(e) or isinstance(e, yf.YFRateLimitError):
+                delay = initial_delay * (2**attempt) # Экспоненциальная задержка
+                logger.warning(f"Rate limit hit for {interval} data. Retrying in {delay} seconds (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(delay)
+            else:
+                logger.error(f"Error downloading data for interval {interval}: {str(e)}")
+                return None # Если другая ошибка, не повторяем
+    logger.error(f"Failed to download data for interval {interval} after {max_retries} attempts due to rate limiting.")
+    return None
 
 
 def calculate_indicators(df):
@@ -204,7 +216,8 @@ def prepare_data():
     if df_15m is None or df_15m.empty:
         raise ValueError("Failed to download or process 15m data.")
     logger.info(f"Downloaded {len(df_15m)} rows for 15m interval.")
-
+    # НОВОЕ: Добавляем небольшую задержку между запросами
+    time.sleep(2) 
     # Оставляем только 1-часовые данные для многотаймфреймового анализа
     df_1h = download_and_process_data("1h", "1y", end_date) # 1 год для 1-часовых данных
 
@@ -499,7 +512,8 @@ async def root():
                 df_latest_full_15m = download_and_process_data("15m", "7d", end_date)
                 if df_latest_full_15m is None:
                     raise ValueError("Failed to download 15m data for signal generation.")
-
+                # НОВОЕ: Добавляем небольшую задержку между запросами
+                time.sleep(2) 
                 # Оставляем только 1-часовые данные для многотаймфреймового анализа
                 df_latest_full_1h = download_and_process_data("1h", "1y", end_date)
                 # df_latest_full_4h = download_and_process_data("4h", "2y", end_date) # УДАЛЕНО
