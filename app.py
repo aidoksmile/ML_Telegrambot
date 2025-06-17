@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+from threading import Thread
+from predictor.train import train_model  # проверь путь, если у тебя другой
+
+@app.on_event("startup")
+def startup_event():
+    Thread(target=train_model).start()
+
 # --- Константы из config.py ---
 MODEL_PATH = config.MODEL_PATH
 ACCURACY_PATH = config.ACCURACY_PATH
