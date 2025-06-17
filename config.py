@@ -18,6 +18,9 @@ TARGET_ACCURACY = 0.6 # Целевая точность/F1-score для моде
 MIN_ACCURACY_FOR_SIGNAL = 0.5 # Минимальная точность/F1-score для генерации торговых сигналов
 MAX_TRAINING_TIME = 1800 # Максимальное время обучения модели в секундах (1 час)
 N_SPLITS_TS_CV = 5 # Количество фолдов для TimeSeriesSplit кросс-валидации в Optuna
+MIN_ATR_SL_MULTIPLIER = 1.5  # Минимальный множитель ATR для SL
+RISK_REWARD_RATIO = 2.0      # Соотношение риск/прибыль (например, 2.0 для 1:2)
+BB_BUFFER_FACTOR = 0.0001    # Небольшой буфер для Bollinger Bands (например, 0.01% от цены
 
 # --- Optuna Settings ---
 OPTUNA_STORAGE_URL = "sqlite:///db.sqlite3" # URL для хранения результатов Optuna (можно использовать PostgreSQL, MySQL и т.д.)
