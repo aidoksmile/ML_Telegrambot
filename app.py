@@ -340,6 +340,7 @@ def train_model():
     
     scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
     logger.info(f"Class distribution in training data: Neg={neg_count}, Pos={pos_count}. Scale_pos_weight={scale_pos_weight}")
+    logger.info("🔍 Starting Optuna hyperparameter search for LightGBM...")
 
 from optuna.exceptions import TrialPruned
 
@@ -385,6 +386,8 @@ def objective(trial):
         avg_f1 = cv_results['valid f1_score-mean'][-1]
     except KeyError:
         avg_f1 = cv_results['cv_agg f1_score-mean'][-1]  # fallback на cv_agg если valid отсутствует
+        
+    logger.info(f"Optuna trial #{trial.number} finished. F1={avg_f1:.4f}")
 
     # Прунинг вручную
     trial.report(avg_f1, step=0)
@@ -403,6 +406,8 @@ def objective(trial):
         load_if_exists=True
     )
     study.optimize(objective, n_trials=None, timeout=MAX_TRAINING_TIME)
+    logger.info(f"✅ Optuna best F1-score: {best_f1_score:.4f}")
+    logger.info(f"📋 Best params: {best_params}")
 
     best_params = study.best_params
     best_f1_score = study.best_value
@@ -416,6 +421,7 @@ def objective(trial):
 
     final_model = LGBMClassifier(**best_params, random_state=42, n_jobs=-1, verbose=-1)
     final_model.fit(X_train_val, y_train_val)
+    logger.info("🎯 Финальное обучение модели завершено")
 
     y_pred_test = final_model.predict(X_test)
     test_accuracy = accuracy_score(y_test, y_pred_test)
