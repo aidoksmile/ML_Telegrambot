@@ -335,47 +335,57 @@ def train_model():
     scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
     logger.info(f"Class distribution in training data: Neg={neg_count}, Pos={pos_count}. Scale_pos_weight={scale_pos_weight}")
 
-    def objective(trial):
-        params = {
-            "objective": "binary",
-            "metric": "binary_logloss",
-            "n_estimators": trial.suggest_int("n_estimators", 50, 1000), # Увеличил верхнюю границу
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 20, 100),
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
-            "random_state": 42,
-            "n_jobs": -1,
-            "verbose": -1,
-            "boosting_type": "gbdt",
-            "scale_pos_weight": scale_pos_weight
-        }
+from optuna.exceptions import TrialPruned
 
-        lgb_train = lgb.Dataset(X_train_val, y_train_val)
-        folds = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
+from optuna.exceptions import TrialPruned
 
-        cv_results = lgb.cv(
-            params,
-            lgb_train,
-            num_boost_round=params["n_estimators"],
-            folds=folds,
-            callbacks=[
-                lgb.early_stopping(stopping_rounds=50, verbose=False),
-                optuna.integration.LightGBMPruningCallback(trial, "cv_agg f1_score")
+def objective(trial):
+    params = {
+        "objective": "binary",
+        "metric": "binary_logloss",  # формально нужен, но мы переопределим через feval
+        "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+        "num_leaves": trial.suggest_int("num_leaves", 20, 100),
+        "max_depth": trial.suggest_int("max_depth", 3, 10),
+        "min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
+        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
+        "random_state": 42,
+        "n_jobs": -1,
+        "verbose": -1,
+        "boosting_type": "gbdt",
+        "scale_pos_weight": scale_pos_weight
+    }
 
-            ],
-            feval=lgbm_f1_score_for_cv,
-            stratified=False,
-            return_cvbooster=False
-        )
-        
-        avg_f1 = cv_results['cv_agg f1_score-mean'][-1]
-        
-        return avg_f1
+    lgb_train = lgb.Dataset(X_train_val, y_train_val)
+    folds = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
+
+    cv_results = lgb.cv(
+        params,
+        lgb_train,
+        num_boost_round=params["n_estimators"],
+        folds=folds,
+        feval=lgbm_f1_score_for_cv,
+        stratified=False,
+        return_cvbooster=False,
+        callbacks=[
+            lgb.early_stopping(stopping_rounds=50, verbose=False)
+        ]
+    )
+
+    try:
+        avg_f1 = cv_results['valid f1_score-mean'][-1]
+    except KeyError:
+        avg_f1 = cv_results['cv_agg f1_score-mean'][-1]  # fallback на cv_agg если valid отсутствует
+
+    # Прунинг вручную
+    trial.report(avg_f1, step=0)
+    if trial.should_prune():
+        raise TrialPruned()
+
+    return avg_f1
 
     logger.info("🔍 Starting Optuna hyperparameter search for LightGBM...")
     study = optuna.create_study(
