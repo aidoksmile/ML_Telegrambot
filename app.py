@@ -19,6 +19,8 @@ import logging
 import optuna.samplers
 import config
 import warnings
+from threading import Thread
+from optuna.exceptions import TrialPruned # Импортируем TrialPruned
 
 # Игнорировать UserWarning из Optuna, если они связаны с повторным сообщением шагов
 warnings.filterwarnings("ignore", message="The reported value is ignored because this `step` is already reported.", category=UserWarning)
@@ -28,17 +30,12 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message="Usage of np.ndarray subset \(sliced data\) is not recommended due to it will double the peak memory cost in LightGBM.", category=UserWarning)
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
+
 # --- Настройка логирования ---
 logging.basicConfig(level=config.LOG_LEVEL, format="""%(asctime)s - %(levelname)s - %(message)s""")
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
-
-from threading import Thread
-
-@app.on_event("startup")
-def startup_event():
-    Thread(target=train_model).start()
 
 # --- Константы из config.py ---
 MODEL_PATH = config.MODEL_PATH
@@ -165,7 +162,6 @@ def lgbm_f1_score_for_cv(preds, train_data):
     y_pred_binary = (preds > 0.5).astype(int)
     return 'f1_score', f1_score(labels, y_pred_binary, average='weighted'), True
 
-import time # Убедитесь, что time импортирован в начале файла
 
 def download_and_process_data(interval, period, end_date, max_retries=5, initial_delay=5):
     logger.info(f"Downloading data for interval {interval} with period {period}...")
@@ -225,13 +221,11 @@ def prepare_data():
     # НОВОЕ: Добавляем небольшую задержку между запросами
     time.sleep(2) 
     # Оставляем только 1-часовые данные для многотаймфреймового анализа
-    df_1h = download_and_process_data("1h", "120d", end_date) # 1 год для 1-часовых данных
+    df_1h = download_and_process_data("1h", "120d", end_date) # 120 дней для 1-часовых данных
 
     # --- 2. Расчет индикаторов для каждого таймфрейма ---
     df_15m_features = calculate_indicators(df_15m)
     df_1h_features = calculate_indicators(df_1h)
-    # df_4h_features = calculate_indicators(df_4h) # УДАЛЕНО
-    # df_1d_features = calculate_indicators(df_1d) # УДАЛЕНО
 
     # --- 3. Объединение признаков разных таймфреймов ---
     df_list = [df_15m_features]
@@ -246,8 +240,6 @@ def prepare_data():
                 resampled_df = df_1h_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_1h"})
                 df_list.append(resampled_df)
     
-    # УДАЛЕНО: Блоки для df_4h_features и df_1d_features
-
     df_combined = pd.concat(df_list, axis=1)
     df_combined = df_combined[~df_combined.index.duplicated(keep='first')]
     df_combined = df_combined.sort_index()
@@ -318,42 +310,23 @@ def prepare_data():
     logger.info(f"X shape: {X_scaled_df.shape}, y shape: {y_raw.shape}, y distribution: {y_raw.value_counts().to_dict()}")
     return X_scaled_df, y_raw, scaler, df_combined
 
-
-def train_model():
-    try:
-        X, y, scaler, df_original = prepare_data()
-    except Exception as e:
-        logger.error(f"Data preparation error, cannot train model: {e}")
-        return
-
-    if len(X) != len(y):
-        raise ValueError("X and y must have the same number of samples.")
-
-    X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False, stratify=None
-    )
-
-    logger.info(f"Train/Validation set size: {len(X_train_val)}, Test set size: {len(X_test)}")
-
-    neg_count = y_train_val.value_counts().get(0, 0)
-    pos_count = y_train_val.value_counts().get(1, 0)
-    
-    scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
-    logger.info(f"Class distribution in training data: Neg={neg_count}, Pos={pos_count}. Scale_pos_weight={scale_pos_weight}")
-    logger.info("🔍 Starting Optuna hyperparameter search for LightGBM...")
-
-from optuna.exceptions import TrialPruned
-
-from optuna.exceptions import TrialPruned
+# Глобальные переменные для X_train_val, y_train_val, scale_pos_weight
+# Они будут установлены в train_model и доступны в objective
+X_train_val = None
+y_train_val = None
+scale_pos_weight = 1.0
 
 def objective(trial):
+    global X_train_val, y_train_val, scale_pos_weight # Объявляем, что используем глобальные переменные
+
+    logger.info(f"🚀 Trial #{trial.number} started") # НОВЫЙ ЛОГ
     params = {
         "objective": "binary",
         "metric": "binary_logloss",  # формально нужен, но мы переопределим через feval
-        "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+        "n_estimators": trial.suggest_int("n_estimators", 50, 300), # Уменьшен верхний предел
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-        "num_leaves": trial.suggest_int("num_leaves", 20, 100),
-        "max_depth": trial.suggest_int("max_depth", 3, 10),
+        "num_leaves": trial.suggest_int("num_leaves", 10, 50), # Уменьшен диапазон
+        "max_depth": trial.suggest_int("max_depth", 3, 7), # Уменьшен диапазон
         "min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
@@ -366,51 +339,98 @@ def objective(trial):
         "scale_pos_weight": scale_pos_weight
     }
     
-    logger.info(f"🚀 Trial #{trial.number} started")
-
     lgb_train = lgb.Dataset(X_train_val, y_train_val)
-    folds = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
-    start = time.time()
-    cv_results = lgb.cv(
-        params,
-        lgb_train,
-        num_boost_round=params["n_estimators"],
-        folds=folds,
-        feval=lgbm_f1_score_for_cv,
-        stratified=False,
-        return_cvbooster=False,
-        callbacks=[
-            lgb.early_stopping(stopping_rounds=50, verbose=False)
-        ]
-    )
-    logger.info(f"✅ Trial #{trial.number} finished. F1={avg_f1:.4f}")
-    logger.info(f"⏱ cv_results time: {time.time() - start:.2f} seconds")
+    folds = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV) # N_SPLITS_TS_CV из config.py
+    
+    logger.info(f"Trial #{trial.number}: Starting LightGBM CV with {params['n_estimators']} estimators and {N_SPLITS_TS_CV} folds...") # НОВЫЙ ЛОГ
+    start_cv_time = time.time()
     try:
-        avg_f1 = cv_results['valid f1_score-mean'][-1]
-    except KeyError:
-        avg_f1 = cv_results['cv_agg f1_score-mean'][-1]  # fallback на cv_agg если valid отсутствует
+        cv_results = lgb.cv(
+            params,
+            lgb_train,
+            num_boost_round=params["n_estimators"],
+            folds=folds,
+            feval=lgbm_f1_score_for_cv,
+            stratified=False,
+            return_cvbooster=False,
+            callbacks=[
+                lgb.early_stopping(stopping_rounds=50, verbose=False),
+                optuna.integration.LightGBMPruningCallback(trial, "valid f1_score") # Исправлено на "valid f1_score"
+            ]
+        )
+        logger.info(f"Trial #{trial.number}: LightGBM CV completed.") # НОВЫЙ ЛОГ
+        logger.info(f"⏱ Trial #{trial.number} CV time: {time.time() - start_cv_time:.2f} seconds") # НОВЫЙ ЛОГ
+
+        try:
+            avg_f1 = cv_results['valid f1_score-mean'][-1]
+        except KeyError:
+            # Fallback, если имя метрики отличается (хотя после исправлений не должно быть)
+            avg_f1 = cv_results['cv_agg f1_score-mean'][-1] 
+            logger.warning(f"Trial #{trial.number}: Used fallback metric name for F1-score.")
+            
+        logger.info(f"Trial #{trial.number}: Average F1-score = {avg_f1:.4f}") # НОВЫЙ ЛОГ
         
-    logger.info(f"Optuna trial #{trial.number} finished. F1={avg_f1:.4f}")
+        return avg_f1
 
-    # Прунинг вручную
-    trial.report(avg_f1, step=0)
-    if trial.should_prune():
-        raise TrialPruned()
+    except Exception as e:
+        logger.error(f"Error during LightGBM CV for trial #{trial.number}: {e}")
+        # Если произошла ошибка во время CV, можно прунить пробный запуск
+        raise TrialPruned() # Это сообщит Optuna, что пробный запуск неудачен
 
-    return avg_f1
+def train_model():
+    global X_train_val, y_train_val, scale_pos_weight # Объявляем, что будем изменять глобальные переменные
+
+    logger.info("Starting model training process...")
+    try:
+        X, y, scaler, df_original = prepare_data()
+    except Exception as e:
+        logger.error(f"Data preparation error, cannot train model: {e}")
+        return
+
+    if len(X) != len(y):
+        logger.error("X and y must have the same number of samples.")
+        return
+
+    X_train_val_local, X_test, y_train_val_local, y_test = train_test_split(
+        X, y, test_size=0.2, shuffle=False, stratify=None
+    )
+    
+    # Присваиваем глобальным переменным значения из локальных
+    X_train_val = X_train_val_local
+    y_train_val = y_train_val_local
+
+    logger.info(f"Train/Validation set size: {len(X_train_val)}, Test set size: {len(X_test)}")
+
+    neg_count = y_train_val.value_counts().get(0, 0)
+    pos_count = y_train_val.value_counts().get(1, 0)
+    
+    scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
+    logger.info(f"Class distribution in training data: Neg={neg_count}, Pos={pos_count}. Scale_pos_weight={scale_pos_weight}")
 
     logger.info("🔍 Starting Optuna hyperparameter search for LightGBM...")
-    study = optuna.create_study(
-        direction="maximize",
-        pruner=optuna.pruners.HyperbandPruner(),
-        sampler=optuna.samplers.TPESampler(),
-        study_name=OPTUNA_STUDY_NAME,
-        storage=OPTUNA_STORAGE_URL,
-        load_if_exists=True
-    )
-    study.optimize(objective, n_trials=None, timeout=MAX_TRAINING_TIME)
-    logger.info(f"✅ Optuna best F1-score: {best_f1_score:.4f}")
-    logger.info(f"📋 Best params: {best_params}")
+    logger.info(f"Optuna storage URL: {OPTUNA_STORAGE_URL}") # Новый лог
+    logger.info(f"Optuna study name: {OPTUNA_STUDY_NAME}") # Новый лог
+
+    try:
+        study = optuna.create_study(
+            direction="maximize",
+            pruner=optuna.pruners.HyperbandPruner(),
+            sampler=optuna.samplers.TPESampler(),
+            study_name=OPTUNA_STUDY_NAME,
+            storage=OPTUNA_STORAGE_URL,
+            load_if_exists=True
+        )
+        logger.info("Optuna study created/loaded successfully.") # Новый лог
+    except Exception as e:
+        logger.error(f"Error creating/loading Optuna study: {e}")
+        return
+
+    try:
+        study.optimize(objective, n_trials=None, timeout=MAX_TRAINING_TIME)
+        logger.info("Optuna optimization completed.") # Новый лог
+    except Exception as e:
+        logger.error(f"Error during Optuna optimization: {e}")
+        return
 
     best_params = study.best_params
     best_f1_score = study.best_value
@@ -455,7 +475,6 @@ def objective(trial):
     else:
         logger.warning("No data to generate signal after training.")
 
-
 def generate_signal(model, scaler, latest_features_scaled, latest_original_data_point):
     try:
         if latest_features_scaled.shape[0] == 0:
@@ -478,144 +497,142 @@ def generate_signal(model, scaler, latest_features_scaled, latest_original_data_
 
         if buy_probability >= PREDICTION_PROB_THRESHOLD:
             signal_type = "BUY"
-            stop_loss = current_price * 0.99
-            take_profit = current_price * 1.015
+            # Пример расчета SL/TP (можно настроить)
+            stop_loss = current_price * (1 - 0.001) # 0.1% ниже текущей цены
+            take_profit = current_price * (1 + 0.002) # 0.2% выше текущей цены
         elif sell_probability >= PREDICTION_PROB_THRESHOLD:
             signal_type = "SELL"
-            stop_loss = current_price * 1.01
-            take_profit = current_price * 0.985
-        
-        signal = {
-            "time": str(datetime.now()),
-            "price": round(current_price, 5),
-            "signal": signal_type,
-            "buy_proba": round(buy_probability, 4),
-            "sell_proba": round(sell_probability, 4),
-            "stop_loss": round(stop_loss, 5) if stop_loss else "N/A",
-            "take_profit": round(take_profit, 5) if take_profit else "N/A",
-        }
+            stop_loss = current_price * (1 + 0.001) # 0.1% выше текущей цены
+            take_profit = current_price * (1 - 0.002) # 0.2% ниже текущей цены
 
-        msg = (
-            f"📊 Signal: {signal['signal']}\n"
-            f"🕒 Time: {signal['time']}\n"
-            f"💰 Price: {signal['price']}\n"
-            f"⬆️ Buy Proba: {signal['buy_proba']}\n"
-            f"⬇️ Sell Proba: {signal['sell_proba']}\n"
-            f"📉 Stop Loss: {signal['stop_loss']}\n"
-            f"📈 Take Profit: {signal['take_profit']}"
+        message = (
+            f"📈 Trading Signal: {signal_type}\n"
+            f"Current Price: {current_price:.5f}\n"
+            f"Buy Probability: {buy_probability:.4f}\n"
+            f"Sell Probability: {sell_probability:.4f}"
         )
-        logger.info(f"Signal generated:\n{msg}")
-        send_telegram_message(msg)
+        if stop_loss and take_profit:
+            message += f"\nStop Loss: {stop_loss:.5f}\nTake Profit: {take_profit:.5f}"
+
+        logger.info(message)
+        send_telegram_message(message)
+
     except Exception as e:
-        logger.error(f"Signal generation error: {e}")
+        logger.error(f"Error generating signal: {e}")
+
+
+@app.on_event("startup")
+def startup_event():
+    Thread(target=train_model).start()
 
 @app.get("/")
 async def root():
+    # Проверяем, существует ли модель и файл с точностью
     if not os.path.exists(MODEL_PATH) or not os.path.exists(ACCURACY_PATH):
-        logger.info("Model or accuracy file not found. Training new model.")
-        train_model()
-    else:
+        logger.info("Model or accuracy file not found. Training process should be running in background.")
+        return {"status": "Model training in progress or not yet started."}
+
+    try:
         with open(ACCURACY_PATH, "r") as f:
-            data = json.load(f)
-        last_trained = datetime.fromisoformat(data["last_trained"])
-        
-        current_metric = data.get("f1_score", data.get("accuracy", 0.0))
-        
-        if (datetime.now() - last_trained).days >= 1 or current_metric < TARGET_ACCURACY:
-            logger.info(f"Model needs retraining. Last trained: {last_trained}, Metric: {current_metric:.2f}")
-            train_model()
+            accuracy_data = json.load(f)
+        current_f1_score = accuracy_data.get("f1_score", 0.0)
+        last_trained = datetime.fromisoformat(accuracy_data["last_trained"])
+
+        # Проверяем, нужно ли переобучать модель
+        # Если прошло более 1 дня или точность ниже целевой
+        if (datetime.now() - last_trained).days >= 1 or current_f1_score < TARGET_ACCURACY:
+            logger.info(f"Model needs retraining. Last trained: {last_trained}, F1-score: {current_f1_score:.4f}. Starting retraining in background.")
+            # Запускаем обучение в отдельном потоке, чтобы не блокировать основной поток FastAPI
+            Thread(target=train_model).start()
+            return {"status": "Model retraining initiated in background."}
+
+        # Если модель актуальна и достаточно точна, генерируем сигнал
+        if current_f1_score >= MIN_ACCURACY_FOR_SIGNAL:
+            model = joblib.load(MODEL_PATH)
+            scaler_data = joblib.load('scaler.pkl')
+            scaler = scaler_data['scaler']
+            
+            end_date = datetime.now()
+            df_latest_full_15m = download_and_process_data("15m", "7d", end_date)
+            if df_latest_full_15m is None:
+                logger.error("Failed to download 15m data for signal generation.")
+                return {"status": "Error: Could not download latest 15m data for signal."}
+
+            time.sleep(2) # Задержка между запросами
+
+            df_latest_full_1h = download_and_process_data("1h", "120d", end_date)
+            if df_latest_full_1h is None:
+                logger.error("Failed to download 1h data for signal generation.")
+                return {"status": "Error: Could not download latest 1h data for signal."}
+
+            # Расчет индикаторов для последних данных
+            df_latest_full_15m_features = calculate_indicators(df_latest_full_15m)
+            df_latest_full_1h_features = calculate_indicators(df_latest_full_1h)
+
+            # Объединение признаков для последних данных
+            df_list_latest = [df_latest_full_15m_features]
+            indicators_to_merge = ["RSI", "MA20", "BB_Up", "BB_Low", "MACD", "MACD_Sig",
+                                   "Stoch_K", "Stoch_D", "ATR", "ROC", "ADX", "PSAR"]
+
+            if df_latest_full_1h_features is not None and not df_latest_full_1h_features.empty:
+                for ind in indicators_to_merge:
+                    if ind in df_latest_full_1h_features.columns:
+                        resampled_df = df_latest_full_1h_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_1h"})
+                        df_list_latest.append(resampled_df)
+
+            df_combined_latest = pd.concat(df_list_latest, axis=1)
+            df_combined_latest = df_combined_latest[~df_combined_latest.index.duplicated(keep='first')]
+            df_combined_latest = df_combined_latest.sort_index()
+
+            # Добавление лагированных признаков для последних данных
+            lag_periods = [1, 2, 3, 4]
+            lagged_features_df_latest = pd.DataFrame(index=df_combined_latest.index)
+            cols_to_lag_latest = [col for col in df_combined_latest.columns if col not in ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"]]
+            cols_to_lag_latest.extend(["Close"])
+
+            for col in set(cols_to_lag_latest):
+                if col in df_combined_latest.columns:
+                    for lag in lag_periods:
+                        lagged_features_df_latest[f"{col}_Lag{lag}"] = df_combined_latest[col].shift(lag)
+            df_combined_latest = pd.concat([df_combined_latest, lagged_features_df_latest], axis=1)
+
+            # Добавление временных признаков для последних данных
+            df_combined_latest["Hour"] = df_combined_latest.index.hour
+            df_combined_latest["DayOfWeek"] = df_combined_latest.index.dayofweek
+            df_combined_latest["DayOfMonth"] = df_combined_latest.index.day
+            df_combined_latest["Month"] = df_combined_latest.index.month
+
+            # Очистка последних данных (аналогично prepare_data)
+            df_combined_latest["PriceChange"] = df_combined_latest["Close"].pct_change()
+            df_combined_latest = df_combined_latest[df_combined_latest['PriceChange'].abs() < 0.1]
+            df_combined_latest = df_combined_latest.dropna()
+
+            if len(df_combined_latest) >= 1:
+                # Исключаем колонки, которые не являются признаками (аналогично prepare_data)
+                exclude_cols_signal = ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits", 
+                                       "Target_Raw", "Target", "PriceChange"]
+                
+                feature_columns_signal = [col for col in df_combined_latest.columns if col not in exclude_cols_signal and not col.startswith("Adj Close")]
+                
+                for basic_col in ["Open", "High", "Low", "Close"]:
+                    if basic_col in df_combined_latest.columns and basic_col not in feature_columns_signal:
+                        feature_columns_signal.append(basic_col)
+
+                latest_features_raw = df_combined_latest[feature_columns_signal].iloc[-1:]
+                latest_features_scaled = scaler.transform(latest_features_raw)
+                
+                latest_original_data_point = df_combined_latest.iloc[-1:]
+
+                generate_signal(model, scaler, latest_features_scaled, latest_original_data_point)
+            else:
+                logger.warning("Could not get enough latest data to generate signal from existing model (need at least 1 row after feature engineering).")
         else:
-            logger.info(f"Model is up to date. Last trained: {last_trained}, Metric: {current_metric:.2f}")
-            try:
-                model = joblib.load(MODEL_PATH)
-                scaler_data = joblib.load('scaler.pkl')
-                scaler = scaler_data['scaler']
-                
-                end_date = datetime.now()
-                # Загружаем достаточно данных, чтобы можно было вычислить все индикаторы и лаги
-                # Например, период "7d" для 15-минутных данных должен быть достаточен.
-                df_latest_full_15m = download_and_process_data("15m", "7d", end_date)
-                if df_latest_full_15m is None:
-                    raise ValueError("Failed to download 15m data for signal generation.")
-                # НОВОЕ: Добавляем небольшую задержку между запросами
-                time.sleep(2) 
-                # Оставляем только 1-часовые данные для многотаймфреймового анализа
-                df_latest_full_1h = download_and_process_data("1h", "1y", end_date)
-                # df_latest_full_4h = download_and_process_data("4h", "2y", end_date) # УДАЛЕНО
-                # df_latest_full_1d = download_and_process_data("1d", "5y", end_date) # УДАЛЕНО
+            logger.warning(f"Model F1-score {current_f1_score:.4f} is below MIN_ACCURACY_FOR_SIGNAL ({MIN_ACCURACY_FOR_SIGNAL}). No signal generated.")
+            return {"status": "Model accuracy too low for signal generation."}
 
-                # Расчет индикаторов для последних данных
-                df_latest_full_15m_features = calculate_indicators(df_latest_full_15m)
-                df_latest_full_1h_features = calculate_indicators(df_latest_full_1h)
-                # df_latest_full_4h_features = calculate_indicators(df_latest_full_4h) # УДАЛЕНО
-                # df_latest_full_1d_features = calculate_indicators(df_latest_full_1d) # УДАЛЕНО
-
-                # Создаем список DataFrames для конкатенации для последних данных
-                df_list_latest = [df_latest_full_15m_features]
-
-                indicators_to_merge = ["RSI", "MA20", "BB_Up", "BB_Low", "MACD", "MACD_Sig",
-                                       "Stoch_K", "Stoch_D", "ATR", "ROC", "ADX", "PSAR"]
-
-                if df_latest_full_1h_features is not None and not df_latest_full_1h_features.empty:
-                    for ind in indicators_to_merge:
-                        if ind in df_latest_full_1h_features.columns:
-                            resampled_df = df_latest_full_1h_features[[ind]].resample("15min").ffill().rename(columns={ind: f"{ind}_1h"})
-                            df_list_latest.append(resampled_df)
-                
-                # УДАЛЕНО: Блоки для df_latest_full_4h_features и df_latest_full_1d_features
-
-                df_combined_latest = pd.concat(df_list_latest, axis=1)
-                df_combined_latest = df_combined_latest[~df_combined_latest.index.duplicated(keep='first')]
-                df_combined_latest = df_combined_latest.sort_index()
-
-                # Добавление лагированных признаков для последних данных
-                lag_periods = [1, 2, 3, 4]
-                lagged_features_df_latest = pd.DataFrame(index=df_combined_latest.index)
-
-                cols_to_lag_latest = [col for col in df_combined_latest.columns if col not in ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"]]
-                cols_to_lag_latest.extend(["Close"])
-
-                for col in set(cols_to_lag_latest):
-                    if col in df_combined_latest.columns:
-                        for lag in lag_periods:
-                            lagged_features_df_latest[f"{col}_Lag{lag}"] = df_combined_latest[col].shift(lag)
-                
-                df_combined_latest = pd.concat([df_combined_latest, lagged_features_df_latest], axis=1)
-
-                # Добавление временных признаков для последних данных
-                time_features_df_latest = pd.DataFrame(index=df_combined_latest.index)
-                time_features_df_latest["Hour"] = df_combined_latest.index.hour
-                time_features_df_latest["DayOfWeek"] = df_combined_latest.index.dayofweek
-                time_features_df_latest["DayOfMonth"] = df_combined_latest.index.day
-                time_features_df_latest["Month"] = df_combined_latest.index.month
-                df_combined_latest = pd.concat([df_combined_latest, time_features_df_latest], axis=1)
-
-                df_combined_latest["PriceChange"] = df_combined_latest["Close"].pct_change()
-                df_combined_latest = df_combined_latest[df_combined_latest["PriceChange"].abs() < 0.1]
-                df_combined_latest = df_combined_latest.dropna()
-
-                if len(df_combined_latest) >= 1:
-                    exclude_cols = ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits",
-                                    "Target_Raw", "Target", "PriceChange"]
-
-                    feature_columns_latest = [col for col in df_combined_latest.columns if col not in exclude_cols and not col.startswith("Adj Close")]
-
-                    for basic_col in ["Open", "High", "Low", "Close"]:
-                        if basic_col in df_combined_latest.columns and basic_col not in feature_columns_latest:
-                            feature_columns_latest.append(basic_col)
-
-                    latest_features_raw = df_combined_latest[feature_columns_latest].iloc[-1:]
-                    latest_features_raw = latest_features_raw.replace([np.inf, -np.inf], np.nan).ffill().bfill()
-
-                    latest_features_scaled = scaler.transform(latest_features_raw)
-
-                    latest_original_data_point = df_combined_latest.iloc[-1:]
-
-                    generate_signal(model, scaler, latest_features_scaled, latest_original_data_point)
-                else:
-                    logger.warning("Could not get enough latest data to generate signal from existing model (need at least 1 row after feature engineering).")
-            except Exception as e:
-                logger.error(f"Error loading model or generating signal from existing model: {e}")
+    except Exception as e:
+        logger.error(f"Error loading model or generating signal from existing model: {e}")
+        return {"status": f"Error: {e}"}
 
     return {"status": "Bot is running"}
 
