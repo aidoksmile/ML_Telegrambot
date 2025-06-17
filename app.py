@@ -219,7 +219,7 @@ def prepare_data():
     # НОВОЕ: Добавляем небольшую задержку между запросами
     time.sleep(2) 
     # Оставляем только 1-часовые данные для многотаймфреймового анализа
-    df_1h = download_and_process_data("1h", "1y", end_date) # 1 год для 1-часовых данных
+    df_1h = download_and_process_data("1h", "120d", end_date) # 1 год для 1-часовых данных
 
     # --- 2. Расчет индикаторов для каждого таймфрейма ---
     df_15m_features = calculate_indicators(df_15m)
@@ -365,7 +365,7 @@ def train_model():
             folds=folds,
             callbacks=[
                 lgb.early_stopping(stopping_rounds=50, verbose=False),
-                optuna.integration.LightGBMPruningCallback(trial, "valid f1_score-mean")
+                optuna.integration.LightGBMPruningCallback(trial, "valid f1_score")
 
             ],
             feval=lgbm_f1_score_for_cv,
