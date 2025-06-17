@@ -26,6 +26,11 @@ OPTUNA_STUDY_NAME = "lgbm_eurusd_study" # Имя исследования Optuna
 # --- Signal Generation Parameters ---
 PREDICTION_PROB_THRESHOLD = 0.55 # Порог вероятности для генерации сигнала (например, >0.55 для BUY, <0.45 для SELL)
 
+# --- Data & Feature Engineering Parameters ---
+# ... (остальные параметры)
+TARGET_PRICE_CHANGE_THRESHOLD = 0.0005 # Порог изменения цены для целевой переменной (например, 0.05%)
+
+
 # --- FastAPI/Uvicorn Settings ---
 UVICORN_HOST = "0.0.0.0"
 UVICORN_PORT = int(os.environ.get("PORT", 10000)) # Используем переменную окружения PORT, если есть
