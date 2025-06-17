@@ -11,12 +11,12 @@ import json
 from fastapi import FastAPI
 import uvicorn
 from datetime import datetime, timedelta
-from send_telegram import send_telegram_message
+from send_telegram import send_telegram_message # Предполагается, что этот модуль существует
 import time
 import optuna
 import logging
 import optuna.samplers
-import config
+import config # Предполагается, что этот модуль существует
 
 # --- Настройка логирования ---
 logging.basicConfig(level=config.LOG_LEVEL, format="""%(asctime)s - %(levelname)s - %(message)s""")
@@ -91,32 +91,37 @@ def prepare_data():
     logger.info("Downloading data...")
     try:
         end_date = datetime.now()
-        df = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
+        # Загрузка 15-минутных данных
+        df_15m = yf.download("EURUSD=X", interval="15m", period=LOOKBACK_PERIOD, end=end_date)
+        # Загрузка дневных данных за 2 года
+        df_1d = yf.download("EURUSD=X", interval="1d", period="2y", end=end_date)
     except Exception as e:
         logger.error(f"Error downloading data: {str(e)}")
         raise ValueError(f"Error downloading data: {str(e)}")
 
-    if df.empty:
-        logger.error("Empty data received from Yahoo Finance.")
-        raise ValueError("Empty data received from Yahoo Finance.")
+    if df_15m.empty:
+        logger.error("Empty 15m data received from Yahoo Finance.")
+        raise ValueError("Empty 15m data received from Yahoo Finance.")
+    if df_1d.empty:
+        logger.warning("Empty 1d data received from Yahoo Finance. Proceeding without daily features.")
 
-    logger.info(f"Downloaded {len(df)} rows, from {df.index[0]} to {df.index[-1]} for 15m interval.")
+    logger.info(f"Downloaded {len(df_15m)} rows for 15m interval, from {df_15m.index[0]} to {df_15m.index[-1]}.")
+    logger.info(f"Downloaded {len(df_1d)} rows for 1d interval, from {df_1d.index[0]} to {df_1d.index[-1]}.")
     
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] for col in df.columns]
+    # Обработка MultiIndex для 15-минутных данных
+    if isinstance(df_15m.columns, pd.MultiIndex):
+        df_15m.columns = [col[0] for col in df_15m.columns]
+    df_15m = df_15m[(df_15m["Close"] > 0) & (df_15m["Open"] > 0)]
+    df_15m["Close"] = df_15m["Close"].ffill().bfill()
+    df_15m["Target"] = df_15m["Close"].shift(-HORIZON_PERIODS)
 
-    df = df[(df["Close"] > 0) & (df["Open"] > 0)]
-    logger.info(f"After filtering Open/Close > 0: {len(df)} rows")
-
-    df["Close"] = df["Close"].ffill().bfill()
-    df["Target"] = df["Close"].shift(-HORIZON_PERIODS)
-
-    if df["Target"].isna().all():
+    if df_15m["Target"].isna().all():
         logger.error("Target column contains only NaNs.")
         raise ValueError("Target column contains only NaNs.")
 
-    df_features = df.copy() 
+    df_features = df_15m.copy() 
 
+    # Вычисление индикаторов для 15-минутных данных
     df_features["RSI"] = compute_rsi(df_features["Close"])
     df_features["MA20"] = df_features["Close"].rolling(window=20).mean()
     df_features["BB_Up"], df_features["BB_Low"] = compute_bollinger_bands(df_features["Close"])
@@ -141,6 +146,31 @@ def prepare_data():
     df_features["PriceChange"] = df_features["Close"].pct_change()
     df_features = df_features[df_features["PriceChange"].abs() < 0.1] 
 
+    # --- Добавление признаков с дневного таймфрейма ---
+    if not df_1d.empty:
+        if isinstance(df_1d.columns, pd.MultiIndex):
+            df_1d.columns = [col[0] for col in df_1d.columns]
+        df_1d = df_1d[(df_1d["Close"] > 0) & (df_1d["Open"] > 0)]
+        df_1d["Close"] = df_1d["Close"].ffill().bfill()
+
+        df_1d_features = pd.DataFrame(index=df_1d.index)
+        df_1d_features["RSI_1d"] = compute_rsi(df_1d["Close"])
+        df_1d_features["MA20_1d"] = df_1d["Close"].rolling(window=20).mean()
+        df_1d_features["MACD_1d"], df_1d_features["MACD_Sig_1d"] = compute_macd(df_1d["Close"])
+        df_1d_features["ATR_1d"] = compute_atr(df_1d["High"], df_1d["Low"], df_1d["Close"])
+        df_1d_features["ROC_1d"] = compute_roc(df_1d["Close"])
+        df_1d_features["Daily_Change"] = df_1d["Close"].pct_change()
+
+        # Переиндексация дневных данных для слияния с 15-минутными
+        # Используем asfreq для создания записей для каждого 15-минутного интервала, затем ffill
+        df_1d_features_resampled = df_1d_features.resample('15min').ffill()
+        
+        # Объединение данных
+        df_features = df_features.merge(df_1d_features_resampled, left_index=True, right_index=True, how='left')
+        logger.info(f"After merging with 1d features: {len(df_features)} rows")
+    else:
+        logger.warning("Daily data not available, skipping 1d features.")
+
     initial_rows = len(df_features)
     df_features = df_features.dropna() 
     logger.info(f"After dropna: {len(df_features)} rows (dropped {initial_rows - len(df_features)})")
@@ -158,6 +188,16 @@ def prepare_data():
         "Close_Lag1", "RSI_Lag1", "MACD_Lag1", "Stoch_K_Lag1", "ATR_Lag1", "ROC_Lag1",
         "Hour", "DayOfWeek", "DayOfMonth", "Month"
     ]
+    
+    # Добавляем новые признаки с дневного таймфрейма, если они были добавлены
+    if not df_1d.empty:
+        daily_features = ["RSI_1d", "MA20_1d", "MACD_1d", "MACD_Sig_1d", "ATR_1d", "ROC_1d", "Daily_Change"]
+        for col in daily_features:
+            if col in df_features.columns:
+                feature_columns.append(col)
+            else:
+                logger.warning(f"Daily feature '{col}' not found in df_features after merge. Skipping.")
+
     X_raw = df_features[feature_columns]
     y_raw = (df_features["Target"] > df_features["Close"]).astype(int)
 
@@ -231,7 +271,6 @@ def train_model():
 
         avg_f1 = np.mean(f1_scores)
         
-        # trial.report(avg_f1, trial.number) # Эту строку удалили
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
 
@@ -267,7 +306,7 @@ def train_model():
     logger.info(f"Final model performance on TEST set: Accuracy={test_accuracy:.4f}, F1-score={test_f1_score:.4f}")
 
     joblib.dump(final_model, MODEL_PATH)
-    joblib.dump({'scaler': scaler}, 'scaler.pkl')
+    joblib.dump({'scaler': scaler, 'feature_columns': X.columns.tolist()}, 'scaler_and_features.pkl') # Сохраняем имена признаков
 
     with open(ACCURACY_PATH, "w") as f:
         json.dump({
@@ -278,23 +317,37 @@ def train_model():
         }, f)
 
     if len(X) > 0:
-        latest_features_scaled = X.iloc[-1:].values
+        # Для генерации сигнала нам нужны последние сырые данные, чтобы правильно их обработать и масштабировать
+        # и получить текущую цену
         latest_original_data_point = df_original.iloc[-1:]
-
-        generate_signal(final_model, scaler, latest_features_scaled, latest_original_data_point)
+        # Передаем последние сырые признаки для масштабирования
+        latest_features_raw = X.iloc[-1:] 
+        generate_signal(final_model, scaler, latest_features_raw, latest_original_data_point)
     else:
         logger.warning("No data to generate signal after training.")
 
 
-def generate_signal(model, scaler, latest_features_scaled, latest_original_data_point):
+def generate_signal(model, scaler, latest_features_raw, latest_original_data_point):
     try:
-        if latest_features_scaled.shape[0] == 0:
+        if latest_features_raw.empty:
             logger.warning("No latest features data to generate signal.")
             return
         if latest_original_data_point.empty:
             logger.warning("No latest original data point to get current price.")
             return
 
+        # Загружаем сохраненные имена признаков
+        scaler_data = joblib.load('scaler_and_features.pkl')
+        saved_feature_columns = scaler_data['feature_columns']
+
+        # Убедимся, что latest_features_raw имеет те же столбцы, что и при обучении
+        # Если какие-то столбцы отсутствуют, заполним их NaN, затем ffill/bfill
+        current_features = latest_features_raw.reindex(columns=saved_feature_columns, fill_value=np.nan)
+        current_features = current_features.replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        
+        # Масштабируем только те признаки, которые были использованы при обучении
+        latest_features_scaled = scaler.transform(current_features)
+        
         prediction_proba = model.predict_proba(latest_features_scaled)[0]
         
         current_price = latest_original_data_point['Close'].iloc[0] 
@@ -358,55 +411,73 @@ async def root():
             logger.info(f"Model is up to date. Last trained: {last_trained}, Metric: {current_metric:.2f}")
             try:
                 model = joblib.load(MODEL_PATH)
-                scaler_data = joblib.load('scaler.pkl')
+                scaler_data = joblib.load('scaler_and_features.pkl')
                 scaler = scaler_data['scaler']
+                saved_feature_columns = scaler_data['feature_columns']
                 
                 end_date = datetime.now()
-                df_latest_full = yf.download("EURUSD=X", interval="15m", period="7d", end=end_date) 
-                if isinstance(df_latest_full.columns, pd.MultiIndex):
-                    df_latest_full.columns = [col[0] for col in df_latest_full.columns]
+                # Загрузка 15-минутных данных для текущего сигнала
+                df_latest_15m = yf.download("EURUSD=X", interval="15m", period="7d", end=end_date) 
+                # Загрузка дневных данных для текущего сигнала
+                df_latest_1d = yf.download("EURUSD=X", interval="1d", period="30d", end=end_date) # Несколько дней для индикаторов
                 
-                df_latest_full['Close'] = df_latest_full['Close'].ffill().bfill()
+                if isinstance(df_latest_15m.columns, pd.MultiIndex):
+                    df_latest_15m.columns = [col[0] for col in df_latest_15m.columns]
+                df_latest_15m['Close'] = df_latest_15m['Close'].ffill().bfill()
                 
-                df_latest_full['RSI'] = compute_rsi(df_latest_full['Close'])
-                df_latest_full['MA20'] = df_latest_full['Close'].rolling(window=20).mean()
-                df_latest_full['BB_Up'], df_latest_full['BB_Low'] = compute_bollinger_bands(df_latest_full['Close'])
-                df_latest_full['MACD'], df_latest_full['MACD_Sig'] = compute_macd(df_latest_full['Close'])
+                # Вычисление индикаторов для 15-минутных данных
+                df_latest_15m['RSI'] = compute_rsi(df_latest_15m['Close'])
+                df_latest_15m['MA20'] = df_latest_15m['Close'].rolling(window=20).mean()
+                df_latest_15m['BB_Up'], df_latest_15m['BB_Low'] = compute_bollinger_bands(df_latest_15m['Close'])
+                df_latest_15m['MACD'], df_latest_15m['MACD_Sig'] = compute_macd(df_latest_15m['Close'])
                 
-                df_latest_full['Stoch_K'], df_latest_full['Stoch_D'] = compute_stochastic_oscillator(df_latest_full['High'], df_latest_full['Low'], df_latest_full['Close'])
-                df_latest_full['ATR'] = compute_atr(df_latest_full['High'], df_latest_full['Low'], df_latest_full['Close'])
-                df_latest_full['ROC'] = compute_roc(df_latest_full['Close'])
+                df_latest_15m['Stoch_K'], df_latest_15m['Stoch_D'] = compute_stochastic_oscillator(df_latest_15m['High'], df_latest_15m['Low'], df_latest_15m['Close'])
+                df_latest_15m['ATR'] = compute_atr(df_latest_15m['High'], df_latest_15m['Low'], df_latest_15m['Close'])
+                df_latest_15m['ROC'] = compute_roc(df_latest_15m['Close'])
 
-                df_latest_full['Close_Lag1'] = df_latest_full['Close'].shift(1)
-                df_latest_full['RSI_Lag1'] = df_latest_full['RSI'].shift(1)
-                df_latest_full['MACD_Lag1'] = df_latest_full['MACD'].shift(1)
-                df_latest_full['Stoch_K_Lag1'] = df_latest_full['Stoch_K'].shift(1)
-                df_latest_full['ATR_Lag1'] = df_latest_full['ATR'].shift(1)
-                df_latest_full['ROC_Lag1'] = df_latest_full['ROC'].shift(1)
+                df_latest_15m['Close_Lag1'] = df_latest_15m['Close'].shift(1)
+                df_latest_15m['RSI_Lag1'] = df_latest_15m['RSI'].shift(1)
+                df_latest_15m['MACD_Lag1'] = df_latest_15m['MACD'].shift(1)
+                df_latest_15m['Stoch_K_Lag1'] = df_latest_15m['Stoch_K'].shift(1)
+                df_latest_15m['ATR_Lag1'] = df_latest_15m['ATR'].shift(1)
+                df_latest_15m['ROC_Lag1'] = df_latest_15m['ROC'].shift(1)
 
-                df_latest_full['Hour'] = df_latest_full.index.hour
-                df_latest_full['DayOfWeek'] = df_latest_full.index.dayofweek
-                df_latest_full['DayOfMonth'] = df_latest_full.index.day
-                df_latest_full['Month'] = df_latest_full.index.month
+                df_latest_15m['Hour'] = df_latest_15m.index.hour
+                df_latest_15m['DayOfWeek'] = df_latest_15m.index.dayofweek
+                df_latest_15m['DayOfMonth'] = df_latest_15m.index.day
+                df_latest_15m['Month'] = df_latest_15m.index.month
 
-                df_latest_full['PriceChange'] = df_latest_full['Close'].pct_change()
-                df_latest_full = df_latest_full[df_latest_full['PriceChange'].abs() < 0.1]
-                df_latest_full = df_latest_full.dropna()
+                df_latest_15m['PriceChange'] = df_latest_15m['Close'].pct_change()
+                df_latest_15m = df_latest_15m[df_latest_15m['PriceChange'].abs() < 0.1]
+                
+                # --- Добавление признаков с дневного таймфрейма для текущего сигнала ---
+                if not df_latest_1d.empty:
+                    if isinstance(df_latest_1d.columns, pd.MultiIndex):
+                        df_latest_1d.columns = [col[0] for col in df_latest_1d.columns]
+                    df_latest_1d = df_latest_1d[(df_latest_1d["Close"] > 0) & (df_latest_1d["Open"] > 0)]
+                    df_latest_1d["Close"] = df_latest_1d["Close"].ffill().bfill()
 
-                if len(df_latest_full) >= 1:
-                    feature_columns = [
-                        'Open', 'High', 'Low', 'Close', 
-                        'RSI', 'MA20', 'BB_Up', 'BB_Low', 'MACD', 'MACD_Sig',
-                        'Stoch_K', 'Stoch_D', 'ATR', 'ROC',
-                        'Close_Lag1', 'RSI_Lag1', 'MACD_Lag1', 'Stoch_K_Lag1', 'ATR_Lag1', 'ROC_Lag1',
-                        'Hour', 'DayOfWeek', 'DayOfMonth', 'Month'
-                    ]
-                    latest_features_raw = df_latest_full[feature_columns].iloc[-1:]
-                    latest_features_scaled = scaler.transform(latest_features_raw)
-                    
-                    latest_original_data_point = df_latest_full.iloc[-1:]
+                    df_1d_features_current = pd.DataFrame(index=df_latest_1d.index)
+                    df_1d_features_current["RSI_1d"] = compute_rsi(df_latest_1d["Close"])
+                    df_1d_features_current["MA20_1d"] = df_latest_1d["Close"].rolling(window=20).mean()
+                    df_1d_features_current["MACD_1d"], df_1d_features_current["MACD_Sig_1d"] = compute_macd(df_latest_1d["Close"])
+                    df_1d_features_current["ATR_1d"] = compute_atr(df_latest_1d["High"], df_latest_1d["Low"], df_latest_1d["Close"])
+                    df_1d_features_current["ROC_1d"] = compute_roc(df_latest_1d["Close"])
+                    df_1d_features_current["Daily_Change"] = df_latest_1d["Close"].pct_change()
 
-                    generate_signal(model, scaler, latest_features_scaled, latest_original_data_point)
+                    df_1d_features_resampled_current = df_1d_features_current.resample('15min').ffill()
+                    df_latest_15m = df_latest_15m.merge(df_1d_features_resampled_current, left_index=True, right_index=True, how='left')
+                else:
+                    logger.warning("Daily data not available for current signal, skipping 1d features.")
+
+                df_latest_15m = df_latest_15m.dropna() # Удаляем NaN после всех вычислений и слияний
+
+                if len(df_latest_15m) >= 1:
+                    # Выбираем только те признаки, которые были использованы при обучении модели
+                    latest_features_raw = df_latest_15m[saved_feature_columns].iloc[-1:]
+                    latest_original_data_point = df_latest_15m.iloc[-1:]
+
+                    generate_signal(model, scaler, latest_features_raw, latest_original_data_point)
                 else:
                     logger.warning("Could not get enough latest data to generate signal from existing model (need at least 1 row).")
             except Exception as e:
@@ -416,4 +487,3 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host=config.UVICORN_HOST, port=config.UVICORN_PORT)
-            
