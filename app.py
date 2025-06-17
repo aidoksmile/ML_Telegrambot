@@ -365,7 +365,7 @@ def train_model():
             folds=folds,
             callbacks=[
                 lgb.early_stopping(stopping_rounds=50, verbose=False),
-                optuna.integration.LightGBMPruningCallback(trial, "valid f1_score")
+                optuna.integration.LightGBMPruningCallback(trial, "f1_score")
 
             ],
             feval=lgbm_f1_score_for_cv,
