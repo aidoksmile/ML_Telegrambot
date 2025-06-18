@@ -48,8 +48,11 @@ FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "YOUR_API_KEY")
 
 # --- Загрузка данных с Finnhub ---
 def get_finnhub_forex_data(symbol="FX:EURUSD", resolution="15", days=60):
-    end_time = int(time.time())
-    start_time = end_time - days * 86400
+    now = int(time.time())
+    # отнимаем 5 минут, чтобы не попасть в будущее
+    end_time = now - 300
+    start_time = end_time - (days * 86400)
+
     url = "https://finnhub.io/api/v1/forex/candle"
     params = {
         "symbol": symbol,
@@ -58,10 +61,14 @@ def get_finnhub_forex_data(symbol="FX:EURUSD", resolution="15", days=60):
         "to": end_time,
         "token": FINNHUB_API_KEY
     }
+
     response = requests.get(url, params=params)
     data = response.json()
+
     if data.get("s") != "ok":
+        logger.error(f"Finnhub API raw response: {data}")
         raise ValueError(f"Finnhub API error: {data.get('s')}")
+
     df = pd.DataFrame({
         "Datetime": pd.to_datetime(data["t"], unit="s", utc=True),
         "Open": data["o"],
@@ -70,8 +77,10 @@ def get_finnhub_forex_data(symbol="FX:EURUSD", resolution="15", days=60):
         "Close": data["c"],
         "Volume": data["v"]
     })
+
     df.set_index("Datetime", inplace=True)
     return df
+
 
 # --- Индикаторы ---
 def compute_rsi(data, periods=14):
