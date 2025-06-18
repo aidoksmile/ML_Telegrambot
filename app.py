@@ -357,7 +357,12 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
         prediction_proba = model.predict_proba(latest_features_scaled)[0]
         
         current_price = latest_original_data_point['Close'].iloc[0] 
-        
+
+        # --- ДОБАВЛЕНО ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ ---
+        logger.info(f"DEBUG: Price used for signal: {current_price}")
+        logger.info(f"DEBUG: Timestamp of latest_original_data_point: {latest_original_data_point.index[0]}")
+        logger.info(f"DEBUG: Full latest_original_data_point:\n{latest_original_data_point}")
+        # --- КОНЕЦ ЛОГИРОВАНИЯ ---
         # --- Получение значений индикаторов для расчета SL/TP ---
         # Убедимся, что эти столбцы существуют в latest_features_raw
         # (они должны быть, если были в feature_columns при обучении)
@@ -473,7 +478,12 @@ async def root():
                     else:
                         df_latest_1d.index = df_latest_1d.index.tz_convert('UTC')
                 # --- End Timezone handling ---
-
+            
+                # --- ДОБАВЛЕНО ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ ---
+                logger.info(f"DEBUG: Raw df_latest_15m head:\n{df_latest_15m.head()}")
+                logger.info(f"DEBUG: Raw df_latest_15m tail:\n{df_latest_15m.tail()}")
+            # --- КОНЕЦ ЛОГИРОВАНИЯ ---
+            
                 if isinstance(df_latest_15m.columns, pd.MultiIndex):
                     df_latest_15m.columns = [col[0] for col in df_latest_15m.columns]
                 df_latest_15m['Close'] = df_latest_15m['Close'].ffill().bfill()
@@ -530,7 +540,11 @@ async def root():
                     # Используем saved_feature_columns для обеспечения правильного порядка и набора признаков
                     latest_features_raw = df_latest_15m[saved_feature_columns].iloc[-1:]
                     latest_original_data_point = df_latest_15m.iloc[-1:]
-
+                    
+                    # --- ДОБАВЛЕНО ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ ---
+                    logger.info(f"DEBUG: latest_original_data_point before generate_signal:\n{latest_original_data_point}")
+                    # --- КОНЕЦ ЛОГИРОВАНИЯ ---
+                    
                     generate_signal(model, scaler, latest_features_raw, latest_original_data_point)
                 else:
                     logger.warning("Could not get enough latest data to generate signal from existing model (need at least 1 row).")
