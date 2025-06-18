@@ -1,23 +1,19 @@
-requests==2.32.4
+# Базовые библиотеки
 pandas==2.3.0
 numpy==1.26.4
-scikit-learn==1.7.0
-joblib==1.5.1
+requests==2.32.4
+python-dotenv==1.1.0
 
-# Web / API
+# ML / моделирование
+scikit-learn==1.7.0
+lightgbm==4.5.0
+joblib==1.5.1
+optuna==4.3.0
+optuna-integration[lightgbm]==4.3.0
+
+# API / веб
 fastapi==0.115.12
 uvicorn==0.34.3
 
 # Telegram уведомления
 python-telegram-bot==21.2
-
-# ML и оптимизация
-lightgbm==4.5.0
-optuna==4.3.0
-optuna-integration[lightgbm]==4.3.0
-
-# Загрузка переменных окружения
-python-dotenv==1.1.0
-
-# Удаляем yfinance — он не используется
-# yfinance==0.2.63  ❌ не нужен
