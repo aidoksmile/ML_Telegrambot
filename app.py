@@ -47,7 +47,7 @@ MAX_TP_ATR_MULTIPLIER = config.MAX_TP_ATR_MULTIPLIER
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "YOUR_API_KEY")
 
 # --- Загрузка данных с Finnhub ---
-def get_finnhub_forex_data(symbol="OANDA:EUR_USD", resolution="15", days=60):
+def get_finnhub_forex_data(symbol="FX:EURUSD", resolution="15", days=60):
     end_time = int(time.time())
     start_time = end_time - days * 86400
     url = "https://finnhub.io/api/v1/forex/candle"
