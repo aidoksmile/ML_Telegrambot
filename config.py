@@ -14,8 +14,8 @@ LOOKBACK_PERIOD = "60d"           # Исторический горизонт (�
 MIN_DATA_ROWS = 200
 
 # --- Метрики модели ---
-TARGET_ACCURACY = 0.99
-MIN_ACCURACY_FOR_SIGNAL = 0.9
+TARGET_ACCURACY = 0.9
+MIN_ACCURACY_FOR_SIGNAL = 0.7
 
 # --- Время обучения ---
 MAX_TRAINING_TIME = 1200          # 20 минут
@@ -26,7 +26,7 @@ OPTUNA_STORAGE_URL = "sqlite:///db.sqlite3"
 OPTUNA_STUDY_NAME = "lgbm_eurusd"
 
 # --- Порог вероятности сигнала ---
-PREDICTION_PROB_THRESHOLD = 0.9
+PREDICTION_PROB_THRESHOLD = 0.8
 
 # --- Торговая логика ---
 MIN_ATR_SL_MULTIPLIER = 1.5
