@@ -22,6 +22,8 @@ import config # Предполагается, что этот модуль су�
 logging.basicConfig(level=config.LOG_LEVEL, format="""%(asctime)s - %(levelname)s - %(message)s""")
 logger = logging.getLogger(__name__)
 
+logger.info("DEBUG: App started and logging is configured.")
+
 app = FastAPI()
 
 # --- Константы из config.py ---
@@ -40,6 +42,8 @@ OPTUNA_STUDY_NAME = config.OPTUNA_STUDY_NAME
 MIN_ATR_SL_MULTIPLIER = config.MIN_ATR_SL_MULTIPLIER
 RISK_REWARD_RATIO = config.RISK_REWARD_RATIO
 BB_BUFFER_FACTOR = config.BB_BUFFER_FACTOR
+MAX_REASONABLE_ATR = config.MAX_REASONABLE_ATR
+MAX_TP_ATR_MULTIPLIER = config.MAX_TP_ATR_MULTIPLIER
 
 # --- Вспомогательные функции для технических индикаторов ---
 def compute_rsi(data, periods=14):
@@ -370,7 +374,10 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
         bb_up = latest_features_raw['BB_Up'].iloc[0]
         bb_low = latest_features_raw['BB_Low'].iloc[0]
         # --- Конец получения индикаторов ---
-
+        if current_atr > MAX_REASONABLE_ATR:
+            logger.warning(f"DEBUG: Capping unusually high ATR from {current_atr:.5f} to {MAX_REASONABLE_ATR:.5f}")
+            current_atr = MAX_REASONABLE_ATR
+            
         signal_type = "HOLD"
         stop_loss = None
         take_profit = None
@@ -395,6 +402,12 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
             risk_amount = current_price - stop_loss
             take_profit = current_price + (risk_amount * RISK_REWARD_RATIO)
 
+            # --- НОВОЕ: Ограничение Take Profit для BUY ---
+            max_tp_distance = MAX_TP_ATR_MULTIPLIER * current_atr
+            max_tp_allowed = current_price + max_tp_distance
+            take_profit = min(calculated_tp, max_tp_allowed) # TP не может быть дальше, чем max_tp_allowed
+            # --- КОНЕЦ НОВОГО ---
+
         elif sell_probability >= PREDICTION_PROB_THRESHOLD:
             signal_type = "SELL"
             # Расчет Stop Loss для SELL:
@@ -411,7 +424,13 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
             # Расчет Take Profit для SELL на основе Risk/Reward
             risk_amount = stop_loss - current_price
             take_profit = current_price - (risk_amount * RISK_REWARD_RATIO)
-        
+            
+            # --- НОВОЕ: Ограничение Take Profit для SELL ---
+            max_tp_distance = MAX_TP_ATR_MULTIPLIER * current_atr
+            max_tp_allowed = current_price - max_tp_distance
+            take_profit = max(calculated_tp, max_tp_allowed) # TP не может быть ниже, чем max_tp_allowed
+            # --- КОНЕЦ НОВОГО --      
+
         signal = {
             "time": str(datetime.now()),
             "price": round(current_price, 5),
