@@ -405,7 +405,7 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
             # --- НОВОЕ: Ограничение Take Profit для BUY ---
             max_tp_distance = MAX_TP_ATR_MULTIPLIER * current_atr
             max_tp_allowed = current_price + max_tp_distance
-            take_profit = min(calculated_tp, max_tp_allowed) # TP не может быть дальше, чем max_tp_allowed
+            take_profit = min(take_profit, max_tp_allowed) # TP не может быть дальше, чем max_tp_allowed
             # --- КОНЕЦ НОВОГО ---
 
         elif sell_probability >= PREDICTION_PROB_THRESHOLD:
@@ -428,7 +428,7 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
             # --- НОВОЕ: Ограничение Take Profit для SELL ---
             max_tp_distance = MAX_TP_ATR_MULTIPLIER * current_atr
             max_tp_allowed = current_price - max_tp_distance
-            take_profit = max(calculated_tp, max_tp_allowed) # TP не может быть ниже, чем max_tp_allowed
+            take_profit = max(take_profit, max_tp_allowed) # TP не может быть ниже, чем max_tp_allowed
             # --- КОНЕЦ НОВОГО --      
 
         signal = {
