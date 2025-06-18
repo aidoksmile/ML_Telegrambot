@@ -9,7 +9,7 @@ MODEL_PATH = "model.pkl"
 ACCURACY_PATH = "accuracy.json"
 
 # --- Настройки данных ---
-HORIZON_PERIODS = 192              # 96 * 15 минут = 1 день
+HORIZON_PERIODS = 100              # 96 * 15 минут = 1 день
 LOOKBACK_PERIOD = "60d"           # Исторический горизонт (не используется напрямую)
 MIN_DATA_ROWS = 200
 
