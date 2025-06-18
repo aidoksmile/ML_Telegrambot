@@ -21,8 +21,8 @@ N_SPLITS_TS_CV = 5 # Количество фолдов для TimeSeriesSplit к
 MIN_ATR_SL_MULTIPLIER = 1.5  # Минимальный множитель ATR для SL
 RISK_REWARD_RATIO = 2.0      # Соотношение риск/прибыль (например, 2.0 для 1:2)
 BB_BUFFER_FACTOR = 0.0001    # Небольшой буфер для Bollinger Bands (например, 0.01% от цены
-MAX_REASONABLE_ATR = config.MAX_REASONABLE_ATR
-MAX_TP_ATR_MULTIPLIER = config.MAX_TP_ATR_MULTIPLIER
+MAX_REASONABLE_ATR = 0.001
+MAX_TP_ATR_MULTIPLIER = 5.0
 # --- Optuna Settings ---
 OPTUNA_STORAGE_URL = "sqlite:///db.sqlite3" # URL для хранения результатов Optuna (можно использовать PostgreSQL, MySQL и т.д.)
 OPTUNA_STUDY_NAME = "lgbm_eurusd_study" # Имя исследования Optuna
