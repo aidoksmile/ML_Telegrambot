@@ -128,7 +128,7 @@ def prepare_data():
 
     df_features = df_15m.copy()
 
-    # Технические индикаторы
+    # --- Технические индикаторы ---
     df_features["RSI"] = compute_rsi(df_features["Close"])
     df_features["MA20"] = df_features["Close"].rolling(window=20).mean()
     df_features["BB_Up"], df_features["BB_Low"] = compute_bollinger_bands(df_features["Close"])
@@ -138,8 +138,20 @@ def prepare_data():
     )
     df_features["ATR"] = compute_atr(df_features["High"], df_features["Low"], df_features["Close"])
     df_features["ROC"] = compute_roc(df_features["Close"])
+    # --- Расширенные признаки для дневного тренда на основе 15m ---
+    df_features["MA_96"] = df_features["Close"].rolling(window=96).mean()
+    df_features["RSI_96"] = compute_rsi(df_features["Close"], periods=96)
+    df_features["price_vs_ma96"] = df_features["Close"] - df_features["MA_96"]
+    df_features["price_above_ma96"] = (df_features["Close"] > df_features["MA_96"]).astype(int)
 
-    # Лаги и временные признаки
+    # --- Порядковый бар в дне ---
+    df_features["bar_in_day"] = df_features.index.to_series().diff().gt("1H").cumsum()
+
+    # --- Дневной процент изменения (через 1D resample) ---
+    daily_returns = df_features["Close"].resample("1D").last().pct_change().ffill()
+    df_features["daily_return"] = daily_returns.resample("15min").ffill()
+
+    # --- Лаги и временные признаки ---
     df_features["Close_Lag1"] = df_features["Close"].shift(1)
     df_features["RSI_Lag1"] = df_features["RSI"].shift(1)
     df_features["MACD_Lag1"] = df_features["MACD"].shift(1)
@@ -153,7 +165,6 @@ def prepare_data():
     df_features["Month"] = df_features.index.month
     df_features["PriceChange"] = df_features["Close"].pct_change()
 
-    # Удалим экстремальные значения и пропуски
     df_features = df_features[df_features["PriceChange"].abs() < 0.1]
     df_features = df_features.dropna()
 
@@ -161,11 +172,20 @@ def prepare_data():
         raise ValueError(f"Недостаточно данных для обучения: {len(df_features)}")
 
     df_features = df_features.dropna(subset=["Target"])
-
+    # --- Обновлённый список признаков ---
     feature_columns = [
-        "Open", "High", "Low", "Close", "RSI", "MA20", "BB_Up", "BB_Low",
+        "Open", "High", "Low", "Close",
+        "RSI", "MA20", "BB_Up", "BB_Low",
         "MACD", "MACD_Sig", "Stoch_K", "Stoch_D", "ATR", "ROC",
+
+        # Новые признаки дневного тренда:
+        "MA_96", "RSI_96", "price_vs_ma96", "price_above_ma96",
+        "daily_return", "bar_in_day",
+
+        # Лаги
         "Close_Lag1", "RSI_Lag1", "MACD_Lag1", "Stoch_K_Lag1", "ATR_Lag1", "ROC_Lag1",
+
+        # Временные признаки
         "Hour", "DayOfWeek", "DayOfMonth", "Month"
     ]
 
@@ -178,6 +198,8 @@ def prepare_data():
     X_scaled_df = pd.DataFrame(X_scaled, columns=X_raw.columns, index=X_raw.index)
 
     return X_scaled_df, y_raw, scaler, df_features
+
+
 def lgbm_f1_score(y_pred, y_true):
     y_true_binary = y_true.astype(int)
     y_pred_binary = (y_pred > 0.5).astype(int)
@@ -343,6 +365,8 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
 
     except Exception as e:
         logger.error(f"❌ Signal generation error: {e}")
+
+
 @app.get("/")
 async def root():
     try:
@@ -360,21 +384,30 @@ async def root():
                 train_model()
             else:
                 logger.info(f"✅ Model OK — last trained {last_trained}, F1 = {metric:.4f}")
+
+                # Загрузка модели и скейлера
                 model = joblib.load(MODEL_PATH)
                 scaler_data = joblib.load("scaler_and_features.pkl")
                 scaler = scaler_data["scaler"]
                 features = scaler_data["feature_columns"]
 
-                df = get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=100)
+                # Загрузка данных и признаков
+                df = get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=500)
                 df["RSI"] = compute_rsi(df["Close"])
                 df["MA20"] = df["Close"].rolling(window=20).mean()
                 df["BB_Up"], df["BB_Low"] = compute_bollinger_bands(df["Close"])
                 df["MACD"], df["MACD_Sig"] = compute_macd(df["Close"])
-                df["Stoch_K"], df["Stoch_D"] = compute_stochastic_oscillator(
-                    df["High"], df["Low"], df["Close"]
-                )
+                df["Stoch_K"], df["Stoch_D"] = compute_stochastic_oscillator(df["High"], df["Low"], df["Close"])
                 df["ATR"] = compute_atr(df["High"], df["Low"], df["Close"])
                 df["ROC"] = compute_roc(df["Close"])
+
+                df["MA_96"] = df["Close"].rolling(window=96).mean()
+                df["RSI_96"] = compute_rsi(df["Close"], periods=96)
+                df["price_vs_ma96"] = df["Close"] - df["MA_96"]
+                df["price_above_ma96"] = (df["Close"] > df["MA_96"]).astype(int)
+                df["bar_in_day"] = df.index.to_series().diff().gt("1H").cumsum()
+                daily_returns = df["Close"].resample("1D").last().pct_change().ffill()
+                df["daily_return"] = daily_returns.resample("15min").ffill()
 
                 df["Close_Lag1"] = df["Close"].shift(1)
                 df["RSI_Lag1"] = df["RSI"].shift(1)
