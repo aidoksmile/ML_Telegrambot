@@ -18,7 +18,7 @@ TARGET_ACCURACY = 0.9
 MIN_ACCURACY_FOR_SIGNAL = 0.7
 
 # --- Время обучения ---
-MAX_TRAINING_TIME = 1200          # 20 минут
+MAX_TRAINING_TIME = 900          # 20 минут
 N_SPLITS_TS_CV = 7
 
 # --- Optuna ---
