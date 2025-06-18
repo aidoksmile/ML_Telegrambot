@@ -1,35 +1,40 @@
 import os
 import logging
 
-# --- General Settings ---
-LOG_LEVEL = logging.INFO # Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+# --- Logging ---
+LOG_LEVEL = logging.INFO  # Можно установить logging.DEBUG для подробного вывода
 
-# --- Model Paths ---
-MODEL_PATH = "model.pkl" # Путь для сохранения обученной модели
-ACCURACY_PATH = "accuracy.json" # Путь для сохранения метрик точности
+# --- Модель ---
+MODEL_PATH = "model.pkl"                  # Путь к файлу с моделью
+ACCURACY_PATH = "accuracy.json"          # Путь к файлу с метриками
 
-# --- Data & Feature Engineering Parameters ---
-HORIZON_PERIODS = 96 # Горизонт предсказания (на сколько периодов вперед предсказываем). 1 день = 96 15-минутных периодов.
-LOOKBACK_PERIOD = "60d" # Период загрузки исторических данных (например, "60d" для 60 дней, "1y" для 1 года)
-MIN_DATA_ROWS = 100 # Минимальное количество строк данных для обучения модели
+# --- Данные и признаки ---
+HORIZON_PERIODS = 96                     # 96 x 15m = 1 день вперёд
+LOOKBACK_PERIOD = "60d"                 # Только для истории — не используется напрямую (заменено на days=60)
+MIN_DATA_ROWS = 100                     # Минимум строк для обучения
 
-# --- Training & Optimization Parameters ---
-TARGET_ACCURACY = 0.6 # Целевая точность/F1-score для модели (если ниже, модель переобучается)
-MIN_ACCURACY_FOR_SIGNAL = 0.5 # Минимальная точность/F1-score для генерации торговых сигналов
-MAX_TRAINING_TIME = 1800 # Максимальное время обучения модели в секундах (1 час)
-N_SPLITS_TS_CV = 5 # Количество фолдов для TimeSeriesSplit кросс-валидации в Optuna
-MIN_ATR_SL_MULTIPLIER = 1.5  # Минимальный множитель ATR для SL
-RISK_REWARD_RATIO = 2.0      # Соотношение риск/прибыль (например, 2.0 для 1:2)
-BB_BUFFER_FACTOR = 0.0001    # Небольшой буфер для Bollinger Bands (например, 0.01% от цены
-MAX_REASONABLE_ATR = 0.001
-MAX_TP_ATR_MULTIPLIER = 5.0
-# --- Optuna Settings ---
-OPTUNA_STORAGE_URL = "sqlite:///db.sqlite3" # URL для хранения результатов Optuna (можно использовать PostgreSQL, MySQL и т.д.)
-OPTUNA_STUDY_NAME = "lgbm_eurusd_study" # Имя исследования Optuna
+# --- Цели по метрикам ---
+TARGET_ACCURACY = 0.6                   # Целевая точность (F1-score)
+MIN_ACCURACY_FOR_SIGNAL = 0.5          # Минимум, при котором сигнал разрешён
 
-# --- Signal Generation Parameters ---
-PREDICTION_PROB_THRESHOLD = 0.55 # Порог вероятности для генерации сигнала (например, >0.55 для BUY, <0.45 для SELL)
+# --- Обучение ---
+MAX_TRAINING_TIME = 1800               # В секундах (30 минут)
+N_SPLITS_TS_CV = 5                     # Кросс-валидация по времени
 
-# --- FastAPI/Uvicorn Settings ---
+# --- Оптимизация Optuna ---
+OPTUNA_STORAGE_URL = "sqlite:///db.sqlite3"
+OPTUNA_STUDY_NAME = "lgbm_eurusd_study"
+
+# --- Стратегия сигналов ---
+PREDICTION_PROB_THRESHOLD = 0.55       # Если выше — BUY, ниже — SELL
+MIN_ATR_SL_MULTIPLIER = 1.5            # Минимальный SL = ATR * множитель
+RISK_REWARD_RATIO = 2.0                # Соотношение TP к риску
+BB_BUFFER_FACTOR = 0.0001              # Маленький отступ от Bollinger Band
+
+# --- Ограничения ATR и TP ---
+MAX_REASONABLE_ATR = 0.001             # Ограничение на слишком большой ATR
+MAX_TP_ATR_MULTIPLIER = 5.0            # TP не дальше чем 5 * ATR
+
+# --- FastAPI / Uvicorn ---
 UVICORN_HOST = "0.0.0.0"
-UVICORN_PORT = int(os.environ.get("PORT", 10000)) # Используем переменную окружения PORT, если есть
+UVICORN_PORT = int(os.environ.get("PORT", 10000))
