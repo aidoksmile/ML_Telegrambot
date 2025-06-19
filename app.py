@@ -44,6 +44,35 @@ OPTUNA_STORAGE_URL = config.OPTUNA_STORAGE_URL
 OPTUNA_STUDY_NAME = config.OPTUNA_STUDY_NAME
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "YOUR_API_KEY")
 
+def get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=1000):
+    base_url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "apikey": TWELVE_DATA_API_KEY
+    }
+    response = requests.get(base_url, params=params)
+    data = response.json()
+
+    if "values" not in data:
+        logger.error(f"Twelve Data API error: {data}")
+        raise ValueError(f"Twelve Data error: {data.get('message', 'Unknown error')}")
+
+    df = pd.DataFrame(data["values"])
+    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+    df.set_index("datetime", inplace=True)
+    df = df.sort_index()
+    df = df.astype(float)
+    df.rename(columns={
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "volume": "Volume"
+    }, inplace=True)
+    return df
+
 def compute_rsi(data, periods=14):
     delta = data.diff()
     gain = delta.where(delta > 0, 0).rolling(window=periods).mean()
