@@ -43,35 +43,6 @@ N_SPLITS_TS_CV = config.N_SPLITS_TS_CV
 OPTUNA_STORAGE_URL = config.OPTUNA_STORAGE_URL
 OPTUNA_STUDY_NAME = config.OPTUNA_STUDY_NAME
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "YOUR_API_KEY")
-def get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=1000):
-    base_url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "outputsize": outputsize,
-        "apikey": TWELVE_DATA_API_KEY
-    }
-    response = requests.get(base_url, params=params)
-    data = response.json()
-
-    if "values" not in data:
-        logger.error(f"Twelve Data API error: {data}")
-        raise ValueError(f"Twelve Data error: {data.get('message', 'Unknown error')}")
-
-    df = pd.DataFrame(data["values"])
-    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-    df.set_index("datetime", inplace=True)
-    df = df.sort_index()
-    df = df.astype(float)
-    df.rename(columns={
-        "open": "Open",
-        "high": "High",
-        "low": "Low",
-        "close": "Close",
-        "volume": "Volume"
-    }, inplace=True)
-    return df
-
 
 def compute_rsi(data, periods=14):
     delta = data.diff()
@@ -81,7 +52,6 @@ def compute_rsi(data, periods=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-
 def compute_bollinger_bands(data, window=20, num_std=2):
     ma = data.rolling(window=window).mean()
     std = data.rolling(window=window).std()
@@ -89,20 +59,19 @@ def compute_bollinger_bands(data, window=20, num_std=2):
     lower = ma - (num_std * std)
     return upper, lower
 
-
 def compute_macd(data, fast=12, slow=26, signal=9):
     exp1 = data.ewm(span=fast, adjust=False).mean()
     exp2 = data.ewm(span=slow, adjust=False).mean()
     macd = exp1 - exp2
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd, signal_line
+
 def compute_stochastic_oscillator(high, low, close, k_period=14, d_period=3):
     lowest_low = low.rolling(window=k_period).min()
     highest_high = high.rolling(window=k_period).max()
     k_percent = ((close - lowest_low) / (highest_high - lowest_low + 1e-10)) * 100
     d_percent = k_percent.rolling(window=d_period).mean()
     return k_percent, d_percent
-
 
 def compute_atr(high, low, close, period=14):
     tr1 = high - low
@@ -112,10 +81,9 @@ def compute_atr(high, low, close, period=14):
     atr = true_range.ewm(span=period, adjust=False).mean()
     return atr
 
-
 def compute_roc(data, period=12):
     return ((data - data.shift(period)) / data.shift(period)) * 100
-    
+
 def prepare_data():
     logger.info("📥 Loading EUR/USD 15min data from Twelve Data...")
     df_15m = get_twelvedata_forex_data("EUR/USD", "15min", outputsize=1000)
@@ -124,6 +92,7 @@ def prepare_data():
 
     df_features = df_15m.copy()
 
+    # Индикаторы
     df_features["RSI"] = compute_rsi(df_features["Close"])
     df_features["MA20"] = df_features["Close"].rolling(window=20).mean()
     df_features["BB_Up"], df_features["BB_Low"] = compute_bollinger_bands(df_features["Close"])
@@ -132,6 +101,7 @@ def prepare_data():
     df_features["ATR"] = compute_atr(df_features["High"], df_features["Low"], df_features["Close"])
     df_features["ROC"] = compute_roc(df_features["Close"])
 
+    # Доп признаки
     df_features["MA_96"] = df_features["Close"].rolling(window=96).mean()
     df_features["RSI_96"] = compute_rsi(df_features["Close"], periods=96)
     df_features["price_vs_ma96"] = df_features["Close"] - df_features["MA_96"]
@@ -155,15 +125,19 @@ def prepare_data():
     df_features["PriceChange"] = df_features["Close"].pct_change()
     df_features = df_features[df_features["PriceChange"].abs() < 0.1].dropna()
 
+    # Будущие уровни
     df_features["FutureMax"] = df_features["Close"].rolling(window=HORIZON_PERIODS).max().shift(-HORIZON_PERIODS)
     df_features["FutureMin"] = df_features["Close"].rolling(window=HORIZON_PERIODS).min().shift(-HORIZON_PERIODS)
-    df_features = df_features.dropna(subset=["FutureMax", "FutureMin"])
+    df_features["Entry"] = df_features["FutureMin"]  # 👈 вход по откату
 
-    df_features["Entry"] = df_features["Close"]
+    df_features = df_features.dropna(subset=["FutureMax", "FutureMin", "Entry"])
     df_features["TakeProfit"] = df_features["FutureMax"]
     df_features["StopLoss"] = df_features["FutureMin"]
-    df_features["Target"] = ((df_features["FutureMax"] - df_features["Entry"]) / df_features["Entry"] >= 0.005).astype(int)
 
+    # Целевой признак
+    df_features["Target"] = ((df_features["TakeProfit"] - df_features["Entry"]) / df_features["Entry"] >= 0.005).astype(int)
+
+    # Финальные признаки
     feature_columns = [
         "Open", "High", "Low", "Close", "RSI", "MA20", "BB_Up", "BB_Low",
         "MACD", "MACD_Sig", "Stoch_K", "Stoch_D", "ATR", "ROC", "MA_96", "RSI_96",
@@ -181,14 +155,12 @@ def prepare_data():
 
     return X_scaled_df, y_raw, scaler, df_features
 
+# === Обучение моделей ===
 def train_model():
-    X, y, scaler, df_original = prepare_data()
+    logger.info("🚀 Training model...")
+    X, y, scaler, df = prepare_data()
+    X_train_val, X_test, y_train_val, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-    X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False
-    )
-
-    
     def objective(trial):
         neg_count = y_train_val.value_counts().get(0, 1)
         pos_count = y_train_val.value_counts().get(1, 1)
@@ -215,196 +187,106 @@ def train_model():
         model = LGBMClassifier(**params)
         tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
         f1_scores = []
-
         for train_idx, val_idx in tscv.split(X_train_val):
-            X_train = X_train_val.iloc[train_idx]
-            X_val = X_train_val.iloc[val_idx]
-            y_train = y_train_val.iloc[train_idx]
-            y_val = y_train_val.iloc[val_idx]
-
-            model.fit(X_train, y_train)
-            preds = model.predict(X_val)
-            f1_scores.append(f1_score(y_val, preds, average='weighted'))
-
+            model.fit(X_train_val.iloc[train_idx], y_train_val.iloc[train_idx])
+            preds = model.predict(X_train_val.iloc[val_idx])
+            f1_scores.append(f1_score(y_train_val.iloc[val_idx], preds, average='weighted'))
         return np.mean(f1_scores)
 
     logger.info("🔍 Starting Optuna optimization...")
-    study = optuna.create_study(
-        direction="maximize",
-        pruner=optuna.pruners.HyperbandPruner(),
-        sampler=optuna.samplers.TPESampler(),
-        study_name=OPTUNA_STUDY_NAME,
-        storage=OPTUNA_STORAGE_URL,
-        load_if_exists=True
-    )
+    study = optuna.create_study(direction="maximize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_STORAGE_URL, load_if_exists=True)
     study.optimize(objective, timeout=MAX_TRAINING_TIME)
 
     best_params = study.best_params
-    final_model = LGBMClassifier(**best_params, random_state=42, n_jobs=-1)
-    final_model.fit(X_train_val, y_train_val)
+    best_params.update({"objective": "binary", "random_state": 42, "n_jobs": -1})
+    model = LGBMClassifier(**best_params)
+    model.fit(X_train_val, y_train_val)
 
-    y_pred_test = final_model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred_test)
-    f1 = f1_score(y_test, y_pred_test, average='weighted')
+    y_pred = model.predict(X_test)
+    f1 = f1_score(y_test, y_pred, average="weighted")
 
-    logger.info(f"✅ Accuracy: {acc:.4f}, F1: {f1:.4f}")
+    joblib.dump(model, MODEL_PATH)
+    joblib.dump({"scaler": scaler, "feature_columns": list(X.columns)}, "scaler_and_features.pkl")
 
-    joblib.dump(final_model, MODEL_PATH)
-    joblib.dump({'scaler': scaler, 'feature_columns': X.columns.tolist()}, 'scaler_and_features.pkl')
     with open(ACCURACY_PATH, "w") as f:
-        json.dump({
-            "accuracy": float(acc),
-            "f1_score": float(f1),
-            "last_trained": str(datetime.now()),
-            "best_params": best_params
-        }, f)
-    # 📈 Обучение регрессоров
-    y_entry = df_original.loc[X_train_val.index, "Entry"]
-    y_sl = df_original.loc[X_train_val.index, "StopLoss"]
-    y_tp = df_original.loc[X_train_val.index, "TakeProfit"]
+        json.dump({"f1_score": f1, "last_trained": datetime.now().isoformat()}, f)
 
-    model_entry = LGBMRegressor(random_state=42)
-    model_sl = LGBMRegressor(random_state=42)
-    model_tp = LGBMRegressor(random_state=42)
+    logger.info(f"✅ Model trained. F1 Score: {f1:.4f}")
 
-    model_entry.fit(X_train_val, y_entry)
-    model_sl.fit(X_train_val, y_sl)
-    model_tp.fit(X_train_val, y_tp)
+# === Генерация сигнала ===
+def generate_signal(model, scaler, latest_features, df_point):
+    probas = model.predict_proba(latest_features)[0]
+    buy_proba = probas[1]
+    sell_proba = probas[0]
 
-    joblib.dump(model_entry, "entry_model.pkl")
-    joblib.dump(model_sl, "sl_model.pkl")
-    joblib.dump(model_tp, "tp_model.pkl")
+    if buy_proba >= PREDICTION_PROB_THRESHOLD:
+        entry = df_point["Entry"].values[0]
+        sl = df_point["StopLoss"].values[0]
+        tp = df_point["TakeProfit"].values[0]
 
-    # 🔔 Генерация сигнала после обучения
-    if len(X) > 0:
-        latest_features_raw = X.iloc[[-1]]
-        latest_original_data_point = df_original.iloc[[-1]]
-        generate_signal(final_model, scaler, latest_features_raw, latest_original_data_point)
-    
-def generate_signal(model, scaler, latest_features_raw, latest_original_data_point):
-    try:
-        if latest_features_raw.empty or latest_original_data_point.empty:
-            logger.warning("⚠️ Missing data for signal.")
-            return
+        message = f"📊 Signal: BUY\n🕒 Time: {df_point.index[0]}\n💰 Price: {entry:.5f}\n⬆️ Buy Proba: {buy_proba:.4f}\n⬇️ Sell Proba: {sell_proba:.4f}\n📉 Stop Loss: {sl:.5f}\n📈 Take Profit: {tp:.5f}"
+        send_telegram_message(message)
+        logger.info(f"📤 Sent signal: {message}")
+    else:
+        logger.info(f"❌ No confident signal. Buy proba: {buy_proba:.4f}")
 
-        # Восстановим порядок признаков
-        scaler_data = joblib.load("scaler_and_features.pkl")
-        saved_columns = scaler_data["feature_columns"]
-        current_features = latest_features_raw.reindex(columns=saved_columns, fill_value=np.nan)
-        current_features = current_features.replace([np.inf, -np.inf], np.nan).ffill().bfill()
-
-        latest_scaled = scaler.transform(current_features)
-
-        # Классификация: есть ли потенциал заработать?
-        prediction_proba = model.predict_proba(latest_scaled)[0]
-        buy_proba = prediction_proba[1]
-        sell_proba = prediction_proba[0]
-
-        # Прогноз цен
-        model_entry = joblib.load("entry_model.pkl")
-        model_sl = joblib.load("sl_model.pkl")
-        model_tp = joblib.load("tp_model.pkl")
-
-        entry_price = model_entry.predict(latest_scaled)[0]
-        stop_loss = model_sl.predict(latest_scaled)[0]
-        take_profit = model_tp.predict(latest_scaled)[0]
-
-        signal_type = "HOLD"
-        if buy_proba >= PREDICTION_PROB_THRESHOLD:
-            signal_type = "BUY"
-        else:
-            entry_price = stop_loss = take_profit = None
-
-        logger.info(f"📊 Signal: {signal_type}, Entry={entry_price:.5f}, SL={stop_loss:.5f}, TP={take_profit:.5f}")
-
-        signal = {
-            "time": str(datetime.now()),
-            "price": round(entry_price, 5) if entry_price else "N/A",
-            "signal": signal_type,
-            "buy_proba": round(buy_proba, 4),
-            "sell_proba": round(sell_proba, 4),
-            "stop_loss": round(stop_loss, 5) if stop_loss else "N/A",
-            "take_profit": round(take_profit, 5) if take_profit else "N/A",
-        }
-
-        msg = (
-            f"📊 Signal: {signal['signal']}\n"
-            f"🕒 Time: {signal['time']}\n"
-            f"💰 Entry Price: {signal['price']}\n"
-            f"⬆️ Buy Proba: {signal['buy_proba']}\n"
-            f"⬇️ Sell Proba: {signal['sell_proba']}\n"
-            f"📉 Stop Loss: {signal['stop_loss']}\n"
-            f"📈 Take Profit: {signal['take_profit']}"
-        )
-
-        logger.info("📤 Sending signal to Telegram.")
-        send_telegram_message(msg)
-
-    except Exception as e:
-        logger.error(f"❌ Signal generation error: {e}")
-        
+# === FastAPI ===
 @app.get("/")
 async def root():
     try:
         if not os.path.exists(MODEL_PATH) or not os.path.exists(ACCURACY_PATH):
             logger.info("🚀 Model not found — training...")
             train_model()
-        else:
-            with open(ACCURACY_PATH, "r") as f:
-                data = json.load(f)
 
-            last_trained = datetime.fromisoformat(data["last_trained"])
-            metric = data.get("f1_score", 0.0)
+        with open(ACCURACY_PATH, "r") as f:
+            data = json.load(f)
 
-            if (datetime.now() - last_trained).days >= 1 or metric < TARGET_ACCURACY:
-                logger.info("🔁 Retraining model due to outdated metrics...")
-                train_model()
-            else:
-                logger.info(f"✅ Model OK — last trained {last_trained}, F1 = {metric:.4f}")
+        last_trained = datetime.fromisoformat(data["last_trained"])
+        if (datetime.now() - last_trained).days >= 1 or data["f1_score"] < TARGET_ACCURACY:
+            logger.info("🔁 Retraining model...")
+            train_model()
 
-                model = joblib.load(MODEL_PATH)
-                scaler_data = joblib.load("scaler_and_features.pkl")
-                scaler = scaler_data["scaler"]
-                features = scaler_data["feature_columns"]
+        model = joblib.load(MODEL_PATH)
+        scaler_data = joblib.load("scaler_and_features.pkl")
+        scaler = scaler_data["scaler"]
+        features = scaler_data["feature_columns"]
 
-                df = get_twelvedata_forex_data("EUR/USD", "15min", 500)
+        df = get_twelvedata_forex_data("EUR/USD", "15min", 500)
+        df = df.dropna()
+        df["RSI"] = compute_rsi(df["Close"])
+        df["MA20"] = df["Close"].rolling(window=20).mean()
+        df["BB_Up"], df["BB_Low"] = compute_bollinger_bands(df["Close"])
+        df["MACD"], df["MACD_Sig"] = compute_macd(df["Close"])
+        df["Stoch_K"], df["Stoch_D"] = compute_stochastic_oscillator(df["High"], df["Low"], df["Close"])
+        df["ATR"] = compute_atr(df["High"], df["Low"], df["Close"])
+        df["ROC"] = compute_roc(df["Close"])
+        df["MA_96"] = df["Close"].rolling(window=96).mean()
+        df["RSI_96"] = compute_rsi(df["Close"], periods=96)
+        df["price_vs_ma96"] = df["Close"] - df["MA_96"]
+        df["price_above_ma96"] = (df["Close"] > df["MA_96"]).astype(int)
+        df["bar_in_day"] = df.index.to_series().diff().gt("1H").cumsum()
+        df["daily_return"] = df["Close"].resample("1D").last().pct_change().ffill().resample("15min").ffill()
+        df["Close_Lag1"] = df["Close"].shift(1)
+        df["RSI_Lag1"] = df["RSI"].shift(1)
+        df["MACD_Lag1"] = df["MACD"].shift(1)
+        df["Stoch_K_Lag1"] = df["Stoch_K"].shift(1)
+        df["ATR_Lag1"] = df["ATR"].shift(1)
+        df["ROC_Lag1"] = compute_roc(df["Close_Lag1"])
+        df["Hour"] = df.index.hour
+        df["DayOfWeek"] = df.index.dayofweek
+        df["DayOfMonth"] = df.index.day
+        df["Month"] = df.index.month
+        df["PriceChange"] = df["Close"].pct_change()
+        df = df[df["PriceChange"].abs() < 0.1].dropna()
 
-                df["RSI"] = compute_rsi(df["Close"])
-                df["MA20"] = df["Close"].rolling(window=20).mean()
-                df["BB_Up"], df["BB_Low"] = compute_bollinger_bands(df["Close"])
-                df["MACD"], df["MACD_Sig"] = compute_macd(df["Close"])
-                df["Stoch_K"], df["Stoch_D"] = compute_stochastic_oscillator(df["High"], df["Low"], df["Close"])
-                df["ATR"] = compute_atr(df["High"], df["Low"], df["Close"])
-                df["ROC"] = compute_roc(df["Close"])
-                df["MA_96"] = df["Close"].rolling(window=96).mean()
-                df["RSI_96"] = compute_rsi(df["Close"], periods=96)
-                df["price_vs_ma96"] = df["Close"] - df["MA_96"]
-                df["price_above_ma96"] = (df["Close"] > df["MA_96"]).astype(int)
-                df["bar_in_day"] = df.index.to_series().diff().gt("1H").cumsum()
-                df["daily_return"] = df["Close"].resample("1D").last().pct_change().ffill().resample("15min").ffill()
-                df["Close_Lag1"] = df["Close"].shift(1)
-                df["RSI_Lag1"] = df["RSI"].shift(1)
-                df["MACD_Lag1"] = df["MACD"].shift(1)
-                df["Stoch_K_Lag1"] = df["Stoch_K"].shift(1)
-                df["ATR_Lag1"] = df["ATR"].shift(1)
-                df["ROC_Lag1"] = compute_roc(df["Close_Lag1"])
-                df["Hour"] = df.index.hour
-                df["DayOfWeek"] = df.index.dayofweek
-                df["DayOfMonth"] = df.index.day
-                df["Month"] = df.index.month
-                df["PriceChange"] = df["Close"].pct_change()
-                df = df[df["PriceChange"].abs() < 0.1].dropna()
-
-                if len(df) >= 1:
-                    latest_features = df[features].iloc[[-1]]
-                    latest_original_point = df.iloc[[-1]]
-                    generate_signal(model, scaler, latest_features, latest_original_point)
-                else:
-                    logger.warning("⚠️ Not enough recent data to generate signal.")
-
+        if len(df) >= 1:
+            latest_features = df[features].iloc[[-1]]
+            latest_original_point = df.iloc[[-1]]
+            generate_signal(model, scaler, latest_features, latest_original_point)
     except Exception as e:
         logger.error(f"❌ root() error: {e}")
 
     return {"status": "Bot is running"}
+
 if __name__ == "__main__":
     uvicorn.run(app, host=config.UVICORN_HOST, port=config.UVICORN_PORT)
