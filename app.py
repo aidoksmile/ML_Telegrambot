@@ -195,44 +195,39 @@ def train_model():
     y_test_int = y_test.astype(int)
     
     def objective(trial):
-        unique_labels = y_train_val_int.unique()
-    
-        # Задаём class_weight по умолчанию
-        class_weight = {0: 1.0, 1: 1.0}
+        params = {
+            "objective": "binary",
+            "metric": "binary_logloss",
+            "n_estimators": trial.suggest_int("n_estimators", 100, 300),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.1, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 20, 100),
+            "max_depth": trial.suggest_int("max_depth", 3, 10),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
+            "random_state": 42,
+            "verbosity": -1,
+        }
 
-        # Если оба класса присутствуют — пересчитаем веса
+        # ⚠️ Проверка наличия обоих классов перед расчетом class_weight
+        unique_labels = y_train_val_int.unique()
         if 0 in unique_labels and 1 in unique_labels:
             neg_count = (y_train_val_int == 0).sum()
             pos_count = (y_train_val_int == 1).sum()
             if pos_count > 0:
                 class_weight = {0: 1.0, 1: neg_count / pos_count}
-                
-        params = {
-            "objective": "binary",
-            "metric": "binary_logloss",
-            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 20, 100),
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
-            "random_state": 42,
-            "n_jobs": -1,
-            "verbose": -1,
-            "class_weight": class_weight,
-        }
-
+                params["class_weight"] = class_weight  # ✅ Только если оба класса есть
 
         model = LGBMClassifier(**params)
-        tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
-        f1_scores = []
+
+        scores = []
         for train_idx, val_idx in tscv.split(X_train_val):
             model.fit(X_train_val.iloc[train_idx], y_train_val_int.iloc[train_idx])
             preds = model.predict(X_train_val.iloc[val_idx])
-            scores.append(f1_score(y_train_val_int.iloc[val_idx], preds, average='weighted'))
+            score = accuracy_score(y_train_val_int.iloc[val_idx], preds)
+            scores.append(score)
 
         return np.mean(scores)
 
