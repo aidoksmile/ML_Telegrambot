@@ -193,11 +193,6 @@ def train_model():
     # Приводим к int для корректной работы class_weight
     y_train_val_int = y_train_val.astype(int)
     y_test_int = y_test.astype(int)
-
-    # Показываем метки классов (важно для отладки!)
-    logger.info(f"Unique labels in y_train_val: {y_train_val_int.unique()}")
-
-    USE_CLASS_WEIGHT = len(unique_labels) > 1
     
     def objective(trial):
 
