@@ -192,12 +192,11 @@ def train_model():
         X, y, test_size=0.2, shuffle=False
     )
 
+    
+def objective(trial):
     neg_count = y_train_val.value_counts().get(0, 1)
     pos_count = y_train_val.value_counts().get(1, 1)
     class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
-    
-def objective(trial):
-    nonlocal class_weight
     
     params = {
         "objective": "binary",
