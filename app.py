@@ -210,16 +210,15 @@ def train_model():
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
             "random_state": 42,
             "verbosity": -1,
+            "class_weight": None  # по умолчанию
         }
 
-        # ⚠️ Проверка наличия обоих классов перед расчетом class_weight
         unique_labels = y_train_val_int.unique()
         if 0 in unique_labels and 1 in unique_labels:
             neg_count = (y_train_val_int == 0).sum()
             pos_count = (y_train_val_int == 1).sum()
             if pos_count > 0:
-                class_weight = {0: 1.0, 1: neg_count / pos_count}
-                params["class_weight"] = class_weight  # ✅ Только если оба класса есть
+                params["class_weight"] = {0: 1.0, 1: neg_count / pos_count}
 
         model = LGBMClassifier(**params)
 
@@ -232,8 +231,11 @@ def train_model():
 
         return np.mean(scores)
 
+
     logger.info("🔍 Starting Optuna optimization...")
     study = optuna.create_study(direction="maximize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_STORAGE_URL, load_if_exists=True)
+    logger.info(f"Unique labels in y_train_val_int: {y_train_val_int.unique()}")
+    logger.info(f"Label distribution:\n{y_train_val_int.value_counts()}")
     study.optimize(objective, timeout=MAX_TRAINING_TIME)
 
     best_params = study.best_params
