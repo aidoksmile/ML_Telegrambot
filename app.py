@@ -182,105 +182,104 @@ def prepare_data():
     return X_scaled_df, y_raw, scaler, df_features
 
 def train_model():
-    try:
-        X, y, scaler, df_original = prepare_data()
-    except Exception as e:
-        logger.error(f"❌ Data preparation failed: {e}")
-        return
+    X, y, scaler, df_original = prepare_data()
 
     X_train_val, X_test, y_train_val, y_test = train_test_split(
         X, y, test_size=0.2, shuffle=False
     )
 
     
-def objective(trial):
-    neg_count = y_train_val.value_counts().get(0, 1)
-    pos_count = y_train_val.value_counts().get(1, 1)
-    class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
-    
-    params = {
-        "objective": "binary",
-        "metric": "binary_logloss",
-        "n_estimators": trial.suggest_int("n_estimators", 50, 300),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-        "num_leaves": trial.suggest_int("num_leaves", 20, 100),
-        "max_depth": trial.suggest_int("max_depth", 3, 10),
-        "min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
-        "random_state": 42,
-        "n_jobs": -1,
-        "verbose": -1,
-        "class_weight": class_weight
-    }
+    def objective(trial):
+        neg_count = y_train_val.value_counts().get(0, 1)
+        pos_count = y_train_val.value_counts().get(1, 1)
+        class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
 
-    model = LGBMClassifier(**params)
-    tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
-    f1_scores = []
+        params = {
+            "objective": "binary",
+            "metric": "binary_logloss",
+            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 20, 100),
+            "max_depth": trial.suggest_int("max_depth", 3, 10),
+            "min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
+            "random_state": 42,
+            "n_jobs": -1,
+            "verbose": -1,
+            "class_weight": class_weight,
+        }
 
-    for train_idx, val_idx in tscv.split(X_train_val):
-        X_train, X_val = X_train_val.iloc[train_idx], X_train_val.iloc[val_idx]
-        y_train, y_val = y_train_val.iloc[train_idx], y_train_val.iloc[val_idx]
-        model.fit(X_train, y_train)
-        preds = model.predict(X_val)
-        f1_scores.append(f1_score(y_val, preds, average='weighted'))
+        model = LGBMClassifier(**params)
+        tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
+        f1_scores = []
 
-    return np.mean(f1_scores)
+        for train_idx, val_idx in tscv.split(X_train_val):
+            X_train = X_train_val.iloc[train_idx]
+            X_val = X_train_val.iloc[val_idx]
+            y_train = y_train_val.iloc[train_idx]
+            y_val = y_train_val.iloc[val_idx]
 
-logger.info("🔍 Starting Optuna optimization...")
-study = optuna.create_study(
-    direction="maximize",
-    pruner=optuna.pruners.HyperbandPruner(),
-    sampler=optuna.samplers.TPESampler(),
-    study_name=OPTUNA_STUDY_NAME,
-    storage=OPTUNA_STORAGE_URL,
-    load_if_exists=True
-)
-study.optimize(objective, timeout=MAX_TRAINING_TIME)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_val)
+            f1_scores.append(f1_score(y_val, preds, average='weighted'))
 
-best_params = study.best_params
-final_model = LGBMClassifier(**best_params, random_state=42, n_jobs=-1)
-final_model.fit(X_train_val, y_train_val)
+        return np.mean(f1_scores)
 
-y_pred_test = final_model.predict(X_test)
-acc = accuracy_score(y_test, y_pred_test)
-f1 = f1_score(y_test, y_pred_test, average='weighted')
+    logger.info("🔍 Starting Optuna optimization...")
+    study = optuna.create_study(
+        direction="maximize",
+        pruner=optuna.pruners.HyperbandPruner(),
+        sampler=optuna.samplers.TPESampler(),
+        study_name=OPTUNA_STUDY_NAME,
+        storage=OPTUNA_STORAGE_URL,
+        load_if_exists=True
+    )
+    study.optimize(objective, timeout=MAX_TRAINING_TIME)
 
-logger.info(f"✅ Accuracy: {acc:.4f}, F1: {f1:.4f}")
+    best_params = study.best_params
+    final_model = LGBMClassifier(**best_params, random_state=42, n_jobs=-1)
+    final_model.fit(X_train_val, y_train_val)
 
-joblib.dump(final_model, MODEL_PATH)
-joblib.dump({'scaler': scaler, 'feature_columns': X.columns.tolist()}, 'scaler_and_features.pkl')
-with open(ACCURACY_PATH, "w") as f:
-    json.dump({
-        "accuracy": float(acc),
-        "f1_score": float(f1),
-        "last_trained": str(datetime.now()),
-        "best_params": best_params
-    }, f)
-# 📈 Обучение регрессоров
-y_entry = df_original.loc[X_train_val.index, "Entry"]
-y_sl = df_original.loc[X_train_val.index, "StopLoss"]
-y_tp = df_original.loc[X_train_val.index, "TakeProfit"]
+    y_pred_test = final_model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred_test)
+    f1 = f1_score(y_test, y_pred_test, average='weighted')
 
-model_entry = LGBMRegressor(random_state=42)
-model_sl = LGBMRegressor(random_state=42)
-model_tp = LGBMRegressor(random_state=42)
+    logger.info(f"✅ Accuracy: {acc:.4f}, F1: {f1:.4f}")
 
-model_entry.fit(X_train_val, y_entry)
-model_sl.fit(X_train_val, y_sl)
-model_tp.fit(X_train_val, y_tp)
+    joblib.dump(final_model, MODEL_PATH)
+    joblib.dump({'scaler': scaler, 'feature_columns': X.columns.tolist()}, 'scaler_and_features.pkl')
+    with open(ACCURACY_PATH, "w") as f:
+        json.dump({
+            "accuracy": float(acc),
+            "f1_score": float(f1),
+            "last_trained": str(datetime.now()),
+            "best_params": best_params
+        }, f)
+    # 📈 Обучение регрессоров
+    y_entry = df_original.loc[X_train_val.index, "Entry"]
+    y_sl = df_original.loc[X_train_val.index, "StopLoss"]
+    y_tp = df_original.loc[X_train_val.index, "TakeProfit"]
 
-joblib.dump(model_entry, "entry_model.pkl")
-joblib.dump(model_sl, "sl_model.pkl")
-joblib.dump(model_tp, "tp_model.pkl")
+    model_entry = LGBMRegressor(random_state=42)
+    model_sl = LGBMRegressor(random_state=42)
+    model_tp = LGBMRegressor(random_state=42)
 
-# 🔔 Генерация сигнала после обучения
-if len(X) > 0:
-    latest_features_raw = X.iloc[[-1]]
-    latest_original_data_point = df_original.iloc[[-1]]
-    generate_signal(final_model, scaler, latest_features_raw, latest_original_data_point)
+    model_entry.fit(X_train_val, y_entry)
+    model_sl.fit(X_train_val, y_sl)
+    model_tp.fit(X_train_val, y_tp)
+
+    joblib.dump(model_entry, "entry_model.pkl")
+    joblib.dump(model_sl, "sl_model.pkl")
+    joblib.dump(model_tp, "tp_model.pkl")
+
+    # 🔔 Генерация сигнала после обучения
+    if len(X) > 0:
+        latest_features_raw = X.iloc[[-1]]
+        latest_original_data_point = df_original.iloc[[-1]]
+        generate_signal(final_model, scaler, latest_features_raw, latest_original_data_point)
     
 def generate_signal(model, scaler, latest_features_raw, latest_original_data_point):
     try:
