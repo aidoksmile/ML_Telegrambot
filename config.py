@@ -9,7 +9,7 @@ MODEL_PATH = "model.pkl"
 ACCURACY_PATH = "accuracy.json"
 
 # --- Настройки данных ---
-HORIZON_PERIODS = 100              # Сдвиг таргета: ~1 день на 15-минутках
+HORIZON_PERIODS = 200              # Сдвиг таргета: ~1 день на 15-минутках
 LOOKBACK_PERIOD = "60d"           # Исторический горизонт (опционально)
 MIN_DATA_ROWS = 200
 
