@@ -42,13 +42,7 @@ PREDICTION_PROB_THRESHOLD = config.PREDICTION_PROB_THRESHOLD
 N_SPLITS_TS_CV = config.N_SPLITS_TS_CV
 OPTUNA_STORAGE_URL = config.OPTUNA_STORAGE_URL
 OPTUNA_STUDY_NAME = config.OPTUNA_STUDY_NAME
-MIN_ATR_SL_MULTIPLIER = config.MIN_ATR_SL_MULTIPLIER
-RISK_REWARD_RATIO = config.RISK_REWARD_RATIO
-BB_BUFFER_FACTOR = config.BB_BUFFER_FACTOR
-MAX_REASONABLE_ATR = config.MAX_REASONABLE_ATR
-MAX_TP_ATR_MULTIPLIER = config.MAX_TP_ATR_MULTIPLIER
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "YOUR_API_KEY")
-# --- API-загрузка данных ---
 def get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=1000):
     base_url = "https://api.twelvedata.com/time_series"
     params = {
@@ -77,7 +71,8 @@ def get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=100
         "volume": "Volume"
     }, inplace=True)
     return df
-# --- Индикаторы ---
+
+
 def compute_rsi(data, periods=14):
     delta = data.diff()
     gain = delta.where(delta > 0, 0).rolling(window=periods).mean()
@@ -86,6 +81,7 @@ def compute_rsi(data, periods=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
+
 def compute_bollinger_bands(data, window=20, num_std=2):
     ma = data.rolling(window=window).mean()
     std = data.rolling(window=window).std()
@@ -93,19 +89,20 @@ def compute_bollinger_bands(data, window=20, num_std=2):
     lower = ma - (num_std * std)
     return upper, lower
 
+
 def compute_macd(data, fast=12, slow=26, signal=9):
     exp1 = data.ewm(span=fast, adjust=False).mean()
     exp2 = data.ewm(span=slow, adjust=False).mean()
     macd = exp1 - exp2
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd, signal_line
-
 def compute_stochastic_oscillator(high, low, close, k_period=14, d_period=3):
     lowest_low = low.rolling(window=k_period).min()
     highest_high = high.rolling(window=k_period).max()
     k_percent = ((close - lowest_low) / (highest_high - lowest_low + 1e-10)) * 100
     d_percent = k_percent.rolling(window=d_period).mean()
     return k_percent, d_percent
+
 
 def compute_atr(high, low, close, period=14):
     tr1 = high - low
@@ -115,45 +112,34 @@ def compute_atr(high, low, close, period=14):
     atr = true_range.ewm(span=period, adjust=False).mean()
     return atr
 
+
 def compute_roc(data, period=12):
     return ((data - data.shift(period)) / data.shift(period)) * 100
 def prepare_data():
     logger.info("📥 Loading EUR/USD 15min data from Twelve Data...")
-    try:
-        df_15m = get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=1000)
-    except Exception as e:
-        logger.error(f"❌ Failed to load data: {e}")
-        raise
-
+    df_15m = get_twelvedata_forex_data("EUR/USD", "15min", outputsize=1000)
     df_15m = df_15m[(df_15m["Close"] > 0) & (df_15m["Open"] > 0)]
     df_15m["Close"] = df_15m["Close"].ffill().bfill()
-    df_15m["Target"] = df_15m["Close"].shift(-HORIZON_PERIODS)
 
     df_features = df_15m.copy()
 
-    # --- Технические индикаторы ---
     df_features["RSI"] = compute_rsi(df_features["Close"])
     df_features["MA20"] = df_features["Close"].rolling(window=20).mean()
     df_features["BB_Up"], df_features["BB_Low"] = compute_bollinger_bands(df_features["Close"])
     df_features["MACD"], df_features["MACD_Sig"] = compute_macd(df_features["Close"])
-    df_features["Stoch_K"], df_features["Stoch_D"] = compute_stochastic_oscillator(
-        df_features["High"], df_features["Low"], df_features["Close"]
-    )
+    df_features["Stoch_K"], df_features["Stoch_D"] = compute_stochastic_oscillator(df_features["High"], df_features["Low"], df_features["Close"])
     df_features["ATR"] = compute_atr(df_features["High"], df_features["Low"], df_features["Close"])
     df_features["ROC"] = compute_roc(df_features["Close"])
 
-    # --- Признаки дневного тренда на 15m ---
     df_features["MA_96"] = df_features["Close"].rolling(window=96).mean()
     df_features["RSI_96"] = compute_rsi(df_features["Close"], periods=96)
     df_features["price_vs_ma96"] = df_features["Close"] - df_features["MA_96"]
     df_features["price_above_ma96"] = (df_features["Close"] > df_features["MA_96"]).astype(int)
 
     df_features["bar_in_day"] = df_features.index.to_series().diff().gt("1H").cumsum()
-
     daily_returns = df_features["Close"].resample("1D").last().pct_change().ffill()
     df_features["daily_return"] = daily_returns.resample("15min").ffill()
 
-    # --- Лаги и временные признаки ---
     df_features["Close_Lag1"] = df_features["Close"].shift(1)
     df_features["RSI_Lag1"] = df_features["RSI"].shift(1)
     df_features["MACD_Lag1"] = df_features["MACD"].shift(1)
@@ -166,41 +152,34 @@ def prepare_data():
     df_features["DayOfMonth"] = df_features.index.day
     df_features["Month"] = df_features.index.month
     df_features["PriceChange"] = df_features["Close"].pct_change()
+    df_features = df_features[df_features["PriceChange"].abs() < 0.1].dropna()
 
-    df_features = df_features[df_features["PriceChange"].abs() < 0.1]
-    df_features = df_features.dropna()
+    df_features["FutureMax"] = df_features["Close"].rolling(window=HORIZON_PERIODS).max().shift(-HORIZON_PERIODS)
+    df_features["FutureMin"] = df_features["Close"].rolling(window=HORIZON_PERIODS).min().shift(-HORIZON_PERIODS)
+    df_features = df_features.dropna(subset=["FutureMax", "FutureMin"])
 
-    if len(df_features) < MIN_DATA_ROWS:
-        raise ValueError(f"Недостаточно данных для обучения: {len(df_features)}")
+    df_features["Entry"] = df_features["Close"]
+    df_features["TakeProfit"] = df_features["FutureMax"]
+    df_features["StopLoss"] = df_features["FutureMin"]
+    df_features["Target"] = ((df_features["FutureMax"] - df_features["Entry"]) / df_features["Entry"] >= 0.005).astype(int)
 
-    df_features = df_features.dropna(subset=["Target"])
-    # --- Обновлённый список признаков ---
     feature_columns = [
-        "Open", "High", "Low", "Close",
-        "RSI", "MA20", "BB_Up", "BB_Low",
-        "MACD", "MACD_Sig", "Stoch_K", "Stoch_D", "ATR", "ROC",
-        "MA_96", "RSI_96", "price_vs_ma96", "price_above_ma96",
-        "daily_return", "bar_in_day",
+        "Open", "High", "Low", "Close", "RSI", "MA20", "BB_Up", "BB_Low",
+        "MACD", "MACD_Sig", "Stoch_K", "Stoch_D", "ATR", "ROC", "MA_96", "RSI_96",
+        "price_vs_ma96", "price_above_ma96", "daily_return", "bar_in_day",
         "Close_Lag1", "RSI_Lag1", "MACD_Lag1", "Stoch_K_Lag1", "ATR_Lag1", "ROC_Lag1",
         "Hour", "DayOfWeek", "DayOfMonth", "Month"
     ]
 
     X_raw = df_features[feature_columns]
-    y_raw = (df_features["Target"] > df_features["Close"]).astype(int)
-
+    y_raw = df_features["Target"]
     X_raw = X_raw.replace([np.inf, -np.inf], np.nan).ffill().bfill()
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
     X_scaled_df = pd.DataFrame(X_scaled, columns=X_raw.columns, index=X_raw.index)
 
-    # --- Цели для регрессии ---
-    df_features["Entry"] = df_features["Close"].shift(-HORIZON_PERIODS)
-    df_features["StopLoss"] = df_features["Entry"] - df_features["ATR"] * MIN_ATR_SL_MULTIPLIER
-    df_features["TakeProfit"] = df_features["Entry"] + (df_features["Entry"] - df_features["StopLoss"]) * RISK_REWARD_RATIO
-
     return X_scaled_df, y_raw, scaler, df_features
-
-def train_model():
+    def train_model():
     try:
         X, y, scaler, df_original = prepare_data()
     except Exception as e:
@@ -214,7 +193,6 @@ def train_model():
     neg_count = y_train_val.value_counts().get(0, 1)
     pos_count = y_train_val.value_counts().get(1, 1)
     class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
-
     def objective(trial):
         params = {
             "objective": "binary",
@@ -277,7 +255,6 @@ def train_model():
             "last_trained": str(datetime.now()),
             "best_params": best_params
         }, f)
-
     # 📈 Обучение регрессоров
     y_entry = df_original.loc[X_train_val.index, "Entry"]
     y_sl = df_original.loc[X_train_val.index, "StopLoss"]
@@ -295,12 +272,11 @@ def train_model():
     joblib.dump(model_sl, "sl_model.pkl")
     joblib.dump(model_tp, "tp_model.pkl")
 
-    # 🧠 Генерация сигнала на последней точке
+    # 🔔 Генерация сигнала после обучения
     if len(X) > 0:
         latest_features_raw = X.iloc[[-1]]
         latest_original_data_point = df_original.iloc[[-1]]
         generate_signal(final_model, scaler, latest_features_raw, latest_original_data_point)
-
 def generate_signal(model, scaler, latest_features_raw, latest_original_data_point):
     try:
         if latest_features_raw.empty or latest_original_data_point.empty:
@@ -315,12 +291,12 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
 
         latest_scaled = scaler.transform(current_features)
 
-        # Классификатор: вероятность покупки/продажи
+        # Классификация: есть ли потенциал заработать?
         prediction_proba = model.predict_proba(latest_scaled)[0]
         buy_proba = prediction_proba[1]
         sell_proba = prediction_proba[0]
 
-        # Регрессоры: вход, SL, TP
+        # Прогноз цен
         model_entry = joblib.load("entry_model.pkl")
         model_sl = joblib.load("sl_model.pkl")
         model_tp = joblib.load("tp_model.pkl")
@@ -332,8 +308,6 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
         signal_type = "HOLD"
         if buy_proba >= PREDICTION_PROB_THRESHOLD:
             signal_type = "BUY"
-        elif sell_proba >= PREDICTION_PROB_THRESHOLD:
-            signal_type = "SELL"
         else:
             entry_price = stop_loss = take_profit = None
 
@@ -383,14 +357,12 @@ async def root():
             else:
                 logger.info(f"✅ Model OK — last trained {last_trained}, F1 = {metric:.4f}")
 
-                # Загрузка модели и скейлера
                 model = joblib.load(MODEL_PATH)
                 scaler_data = joblib.load("scaler_and_features.pkl")
                 scaler = scaler_data["scaler"]
                 features = scaler_data["feature_columns"]
 
-                # Загрузка данных
-                df = get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=500)
+                df = get_twelvedata_forex_data("EUR/USD", "15min", 500)
 
                 df["RSI"] = compute_rsi(df["Close"])
                 df["MA20"] = df["Close"].rolling(window=20).mean()
@@ -399,28 +371,23 @@ async def root():
                 df["Stoch_K"], df["Stoch_D"] = compute_stochastic_oscillator(df["High"], df["Low"], df["Close"])
                 df["ATR"] = compute_atr(df["High"], df["Low"], df["Close"])
                 df["ROC"] = compute_roc(df["Close"])
-
                 df["MA_96"] = df["Close"].rolling(window=96).mean()
                 df["RSI_96"] = compute_rsi(df["Close"], periods=96)
                 df["price_vs_ma96"] = df["Close"] - df["MA_96"]
                 df["price_above_ma96"] = (df["Close"] > df["MA_96"]).astype(int)
                 df["bar_in_day"] = df.index.to_series().diff().gt("1H").cumsum()
-                daily_returns = df["Close"].resample("1D").last().pct_change().ffill()
-                df["daily_return"] = daily_returns.resample("15min").ffill()
-
+                df["daily_return"] = df["Close"].resample("1D").last().pct_change().ffill().resample("15min").ffill()
                 df["Close_Lag1"] = df["Close"].shift(1)
                 df["RSI_Lag1"] = df["RSI"].shift(1)
                 df["MACD_Lag1"] = df["MACD"].shift(1)
                 df["Stoch_K_Lag1"] = df["Stoch_K"].shift(1)
                 df["ATR_Lag1"] = df["ATR"].shift(1)
                 df["ROC_Lag1"] = compute_roc(df["Close_Lag1"])
-
                 df["Hour"] = df.index.hour
                 df["DayOfWeek"] = df.index.dayofweek
                 df["DayOfMonth"] = df.index.day
                 df["Month"] = df.index.month
                 df["PriceChange"] = df["Close"].pct_change()
-
                 df = df[df["PriceChange"].abs() < 0.1].dropna()
 
                 if len(df) >= 1:
