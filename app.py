@@ -31,8 +31,8 @@ LOOKBACK_PERIOD = 96  # ~1 день
 MIN_DATA_ROWS = config.MIN_DATA_ROWS
 TARGET_ACCURACY = 0.75
 MIN_ACCURACY_FOR_SIGNAL = config.MIN_ACCURACY_FOR_SIGNAL
-MAX_TRAINING_TIME = 3600  # 1 час
-PREDICTION_PROB_THRESHOLD = 0.7
+MAX_TRAINING_TIME = 1000  # Уменьшено для тестирования
+PREDICTION_PROB_THRESHOLD = 0.6  # Снижено для сигналов
 N_SPLITS_TS_CV = 5
 OPTUNA_STORAGE_URL = config.OPTUNA_STORAGE_URL
 OPTUNA_STUDY_NAME = config.OPTUNA_STUDY_NAME
@@ -122,7 +122,7 @@ def prepare_data():
 
     # Целевой признак
     df_features["FutureReturn"] = df_features["Close"].shift(-HORIZON_PERIODS) / df_features["Close"] - 1
-    df_features["Target"] = (df_features["FutureReturn"] >= 0.005).astype(int)
+    df_features["Target"] = (df_features["FutureReturn"] >= 0.002).astype(int)  # Смягчен порог
 
     df_features = df_features.dropna()
 
@@ -166,7 +166,8 @@ def train_model():
             "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
             "random_state": 42,
-            "verbosity": -1
+            "verbosity": -1,
+            "class_weight": "balanced"  # Для дисбаланса
         }
 
         model = LGBMClassifier(**params)
@@ -186,18 +187,19 @@ def train_model():
     study.optimize(objective, timeout=MAX_TRAINING_TIME)
 
     best_params = study.best_params
-    best_params.update({"objective": "binary", "random_state": 42, "n_jobs": -1})
+    best_params.update({"objective": "binary", "random_state": 42, "n_jobs": -1, "class_weight": "balanced"})
     model = LGBMClassifier(**best_params)
     model.fit(X_train_val, y_train_val)
 
     y_pred = model.predict(X_test)
+    y_pred_proba = model.predict_proba(X_test)[:, 1]
     f1 = f1_score(y_test, y_pred, average="weighted")
     logger.info(f"✅ Model trained. F1 Score: {f1:.4f}")
+    logger.info(f"Prediction probabilities (mean, std): {np.mean(y_pred_proba):.4f}, {np.std(y_pred_proba):.4f}")
 
     if f1 < 0.6 or f1 > 0.95:
         logger.warning("⚠️ Suspicious F1 score. Possible overfitting or data issue.")
 
-    # Логирование важности признаков
     importance = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
     logger.info(f"Feature importance:\n{importance}")
 
