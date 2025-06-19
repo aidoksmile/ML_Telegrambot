@@ -190,12 +190,20 @@ def train_model():
     X, y, scaler, df = prepare_data()
     X_train_val, X_test, y_train_val, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-    def objective(trial):
-        y_train_val_int = y_train_val.astype(int)
-        neg_count = y_train_val_int.value_counts().get(0, 1)
-        pos_count = y_train_val_int.value_counts().get(1, 1)
-        class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
+    # Приводим к int для корректной работы class_weight
+    y_train_val_int = y_train_val.astype(int)
+    y_test_int = y_test.astype(int)
 
+    # Показываем метки классов (важно для отладки!)
+    logger.info(f"Unique labels in y_train_val: {y_train_val_int.unique()}")
+
+    def objective(trial):
+        neg_count = (y_train_val_int == 0).sum()
+        pos_count = (y_train_val_int == 1).sum()
+        class_weight = {
+            0: 1.0,
+            1: neg_count / pos_count if pos_count > 0 else 1.0
+        }
 
         params = {
             "objective": "binary",
@@ -221,8 +229,9 @@ def train_model():
         for train_idx, val_idx in tscv.split(X_train_val):
             model.fit(X_train_val.iloc[train_idx], y_train_val_int.iloc[train_idx])
             preds = model.predict(X_train_val.iloc[val_idx])
-            f1_scores.append(f1_score(y_train_val.iloc[val_idx], preds, average='weighted'))
-        return np.mean(f1_scores)
+            scores.append(f1_score(y_train_val_int.iloc[val_idx], preds, average='weighted'))
+
+        return np.mean(scores)
 
     logger.info("🔍 Starting Optuna optimization...")
     study = optuna.create_study(direction="maximize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_STORAGE_URL, load_if_exists=True)
