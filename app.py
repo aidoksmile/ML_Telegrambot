@@ -1,29 +1,35 @@
 import pandas as pd
 import numpy as np
-from lightgbm import LGBMClassifier
+import requests
+import joblib
+import json
+import os
+import time
+import logging
+
+from datetime import datetime, timedelta
+
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
-import joblib
-import os
-import json
+from lightgbm import LGBMClassifier, LGBMRegressor
+
+import optuna
+import optuna.samplers
+
 from fastapi import FastAPI
 import uvicorn
-from datetime import datetime, timedelta
-from send_telegram import send_telegram_message
-import time
-import optuna
-import logging
-import optuna.samplers
+
 import config
-import requests
+from send_telegram import send_telegram_message
 
 # --- Логирование ---
 logging.basicConfig(level=config.LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
 app = FastAPI()
 
-# --- Константы из config.py ---
+# --- Константы ---
 MODEL_PATH = config.MODEL_PATH
 ACCURACY_PATH = config.ACCURACY_PATH
 HORIZON_PERIODS = config.HORIZON_PERIODS
@@ -41,10 +47,8 @@ RISK_REWARD_RATIO = config.RISK_REWARD_RATIO
 BB_BUFFER_FACTOR = config.BB_BUFFER_FACTOR
 MAX_REASONABLE_ATR = config.MAX_REASONABLE_ATR
 MAX_TP_ATR_MULTIPLIER = config.MAX_TP_ATR_MULTIPLIER
-
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "YOUR_API_KEY")
-
-# --- Twelve Data API: EUR/USD 15min ---
+# --- API-загрузка данных ---
 def get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=1000):
     base_url = "https://api.twelvedata.com/time_series"
     params = {
@@ -73,7 +77,6 @@ def get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=100
         "volume": "Volume"
     }, inplace=True)
     return df
-
 # --- Индикаторы ---
 def compute_rsi(data, periods=14):
     delta = data.diff()
@@ -138,16 +141,15 @@ def prepare_data():
     )
     df_features["ATR"] = compute_atr(df_features["High"], df_features["Low"], df_features["Close"])
     df_features["ROC"] = compute_roc(df_features["Close"])
-    # --- Расширенные признаки для дневного тренда на основе 15m ---
+
+    # --- Признаки дневного тренда на 15m ---
     df_features["MA_96"] = df_features["Close"].rolling(window=96).mean()
     df_features["RSI_96"] = compute_rsi(df_features["Close"], periods=96)
     df_features["price_vs_ma96"] = df_features["Close"] - df_features["MA_96"]
     df_features["price_above_ma96"] = (df_features["Close"] > df_features["MA_96"]).astype(int)
 
-    # --- Порядковый бар в дне ---
     df_features["bar_in_day"] = df_features.index.to_series().diff().gt("1H").cumsum()
 
-    # --- Дневной процент изменения (через 1D resample) ---
     daily_returns = df_features["Close"].resample("1D").last().pct_change().ffill()
     df_features["daily_return"] = daily_returns.resample("15min").ffill()
 
@@ -177,15 +179,9 @@ def prepare_data():
         "Open", "High", "Low", "Close",
         "RSI", "MA20", "BB_Up", "BB_Low",
         "MACD", "MACD_Sig", "Stoch_K", "Stoch_D", "ATR", "ROC",
-
-        # Новые признаки дневного тренда:
         "MA_96", "RSI_96", "price_vs_ma96", "price_above_ma96",
         "daily_return", "bar_in_day",
-
-        # Лаги
         "Close_Lag1", "RSI_Lag1", "MACD_Lag1", "Stoch_K_Lag1", "ATR_Lag1", "ROC_Lag1",
-
-        # Временные признаки
         "Hour", "DayOfWeek", "DayOfMonth", "Month"
     ]
 
@@ -197,97 +193,12 @@ def prepare_data():
     X_scaled = scaler.fit_transform(X_raw)
     X_scaled_df = pd.DataFrame(X_scaled, columns=X_raw.columns, index=X_raw.index)
 
+    # --- Цели для регрессии ---
+    df_features["Entry"] = df_features["Close"].shift(-HORIZON_PERIODS)
+    df_features["StopLoss"] = df_features["Entry"] - df_features["ATR"] * MIN_ATR_SL_MULTIPLIER
+    df_features["TakeProfit"] = df_features["Entry"] + (df_features["Entry"] - df_features["StopLoss"]) * RISK_REWARD_RATIO
+
     return X_scaled_df, y_raw, scaler, df_features
-
-
-def lgbm_f1_score(y_pred, y_true):
-    y_true_binary = y_true.astype(int)
-    y_pred_binary = (y_pred > 0.5).astype(int)
-    return 'f1_score', f1_score(y_true_binary, y_pred_binary, average='weighted'), True
-
-def train_model():
-    try:
-        X, y, scaler, df_original = prepare_data()
-    except Exception as e:
-        logger.error(f"❌ Data preparation failed: {e}")
-        return
-
-    X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False
-    )
-
-    neg_count = y_train_val.value_counts().get(0, 1)
-    pos_count = y_train_val.value_counts().get(1, 1)
-    class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
-
-    def objective(trial):
-        params = {
-            "objective": "binary",
-            "metric": "binary_logloss",
-            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 20, 100),
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
-            "random_state": 42,
-            "n_jobs": -1,
-            "verbose": -1,
-            "class_weight": class_weight
-        }
-
-        model = LGBMClassifier(**params)
-        tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
-        f1_scores = []
-
-        for train_idx, val_idx in tscv.split(X_train_val):
-            X_train, X_val = X_train_val.iloc[train_idx], X_train_val.iloc[val_idx]
-            y_train, y_val = y_train_val.iloc[train_idx], y_train_val.iloc[val_idx]
-            model.fit(X_train, y_train)
-            preds = model.predict(X_val)
-            f1_scores.append(f1_score(y_val, preds, average='weighted'))
-
-        return np.mean(f1_scores)
-
-    logger.info("🔍 Starting Optuna optimization...")
-    study = optuna.create_study(
-        direction="maximize",
-        pruner=optuna.pruners.HyperbandPruner(),
-        sampler=optuna.samplers.TPESampler(),
-        study_name=OPTUNA_STUDY_NAME,
-        storage=OPTUNA_STORAGE_URL,
-        load_if_exists=True
-    )
-    study.optimize(objective, timeout=MAX_TRAINING_TIME)
-
-    best_params = study.best_params
-    final_model = LGBMClassifier(**best_params, random_state=42, n_jobs=-1)
-    final_model.fit(X_train_val, y_train_val)
-
-    y_pred_test = final_model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred_test)
-    f1 = f1_score(y_test, y_pred_test, average='weighted')
-
-    logger.info(f"✅ Accuracy: {acc:.4f}, F1: {f1:.4f}")
-
-    joblib.dump(final_model, MODEL_PATH)
-    joblib.dump({'scaler': scaler, 'feature_columns': X.columns.tolist()}, 'scaler_and_features.pkl')
-    with open(ACCURACY_PATH, "w") as f:
-        json.dump({
-            "accuracy": float(acc),
-            "f1_score": float(f1),
-            "last_trained": str(datetime.now()),
-            "best_params": best_params
-        }, f)
-
-    # Сигнал после обучения
-    if len(X) > 0:
-        latest_features_raw = X.iloc[[-1]]
-        latest_original_data_point = df_original.iloc[[-1]]
-        generate_signal(final_model, scaler, latest_features_raw, latest_original_data_point)
 def generate_signal(model, scaler, latest_features_raw, latest_original_data_point):
     try:
         if latest_features_raw.empty or latest_original_data_point.empty:
@@ -301,48 +212,34 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
         current_features = current_features.replace([np.inf, -np.inf], np.nan).ffill().bfill()
 
         latest_scaled = scaler.transform(current_features)
+
+        # Классификатор: вероятность покупки/продажи
         prediction_proba = model.predict_proba(latest_scaled)[0]
-        current_price = latest_original_data_point["Close"].iloc[0]
-
-        current_atr = latest_features_raw["ATR"].iloc[0]
-        bb_up = latest_features_raw["BB_Up"].iloc[0]
-        bb_low = latest_features_raw["BB_Low"].iloc[0]
-
-        if current_atr > MAX_REASONABLE_ATR:
-            logger.warning(f"🔺 Capping ATR from {current_atr:.5f} to {MAX_REASONABLE_ATR:.5f}")
-            current_atr = MAX_REASONABLE_ATR
-
         buy_proba = prediction_proba[1]
         sell_proba = prediction_proba[0]
-        signal_type = "HOLD"
-        stop_loss = None
-        take_profit = None
 
+        # Регрессоры: вход, SL, TP
+        model_entry = joblib.load("entry_model.pkl")
+        model_sl = joblib.load("sl_model.pkl")
+        model_tp = joblib.load("tp_model.pkl")
+
+        entry_price = model_entry.predict(latest_scaled)[0]
+        stop_loss = model_sl.predict(latest_scaled)[0]
+        take_profit = model_tp.predict(latest_scaled)[0]
+
+        signal_type = "HOLD"
         if buy_proba >= PREDICTION_PROB_THRESHOLD:
             signal_type = "BUY"
-            structural_sl = bb_low - current_price * BB_BUFFER_FACTOR
-            atr_sl = current_price - MIN_ATR_SL_MULTIPLIER * current_atr
-            stop_loss = min(structural_sl, atr_sl, current_price * 0.999)
-            stop_loss = max(stop_loss, current_price - MAX_TP_ATR_MULTIPLIER * current_atr)
-            risk = current_price - stop_loss
-            take_profit = current_price + risk * RISK_REWARD_RATIO
-            take_profit = min(take_profit, current_price + MAX_TP_ATR_MULTIPLIER * current_atr)
-
         elif sell_proba >= PREDICTION_PROB_THRESHOLD:
             signal_type = "SELL"
-            structural_sl = bb_up + current_price * BB_BUFFER_FACTOR
-            atr_sl = current_price + MIN_ATR_SL_MULTIPLIER * current_atr
-            stop_loss = max(structural_sl, atr_sl, current_price * 1.001)
-            stop_loss = min(stop_loss, current_price + MAX_TP_ATR_MULTIPLIER * current_atr)
-            risk = stop_loss - current_price
-            take_profit = current_price - risk * RISK_REWARD_RATIO
-            take_profit = max(take_profit, current_price - MAX_TP_ATR_MULTIPLIER * current_atr)
+        else:
+            entry_price = stop_loss = take_profit = None
 
-        logger.info(f"📊 Signal: {signal_type}, ATR={current_atr:.5f}, SL={stop_loss:.5f}, TP={take_profit:.5f}")
+        logger.info(f"📊 Signal: {signal_type}, Entry={entry_price:.5f}, SL={stop_loss:.5f}, TP={take_profit:.5f}")
 
         signal = {
             "time": str(datetime.now()),
-            "price": round(current_price, 5),
+            "price": round(entry_price, 5) if entry_price else "N/A",
             "signal": signal_type,
             "buy_proba": round(buy_proba, 4),
             "sell_proba": round(sell_proba, 4),
@@ -353,7 +250,7 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
         msg = (
             f"📊 Signal: {signal['signal']}\n"
             f"🕒 Time: {signal['time']}\n"
-            f"💰 Price: {signal['price']}\n"
+            f"💰 Entry Price: {signal['price']}\n"
             f"⬆️ Buy Proba: {signal['buy_proba']}\n"
             f"⬇️ Sell Proba: {signal['sell_proba']}\n"
             f"📉 Stop Loss: {signal['stop_loss']}\n"
@@ -365,8 +262,6 @@ def generate_signal(model, scaler, latest_features_raw, latest_original_data_poi
 
     except Exception as e:
         logger.error(f"❌ Signal generation error: {e}")
-
-
 @app.get("/")
 async def root():
     try:
@@ -376,6 +271,7 @@ async def root():
         else:
             with open(ACCURACY_PATH, "r") as f:
                 data = json.load(f)
+
             last_trained = datetime.fromisoformat(data["last_trained"])
             metric = data.get("f1_score", 0.0)
 
@@ -391,8 +287,9 @@ async def root():
                 scaler = scaler_data["scaler"]
                 features = scaler_data["feature_columns"]
 
-                # Загрузка данных и признаков
+                # Загрузка данных
                 df = get_twelvedata_forex_data(symbol="EUR/USD", interval="15min", outputsize=500)
+
                 df["RSI"] = compute_rsi(df["Close"])
                 df["MA20"] = df["Close"].rolling(window=20).mean()
                 df["BB_Up"], df["BB_Low"] = compute_bollinger_bands(df["Close"])
@@ -421,6 +318,7 @@ async def root():
                 df["DayOfMonth"] = df.index.day
                 df["Month"] = df.index.month
                 df["PriceChange"] = df["Close"].pct_change()
+
                 df = df[df["PriceChange"].abs() < 0.1].dropna()
 
                 if len(df) >= 1:
@@ -429,10 +327,10 @@ async def root():
                     generate_signal(model, scaler, latest_features, latest_original_point)
                 else:
                     logger.warning("⚠️ Not enough recent data to generate signal.")
+
     except Exception as e:
         logger.error(f"❌ root() error: {e}")
 
     return {"status": "Bot is running"}
-
 if __name__ == "__main__":
     uvicorn.run(app, host=config.UVICORN_HOST, port=config.UVICORN_PORT)
