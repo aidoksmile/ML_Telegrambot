@@ -8,9 +8,9 @@ import time
 import logging
 from datetime import datetime
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
-from sklearn.metrics import f1_score
+from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
-from lightgbm import LGBMClassifier
+from lightgbm import LGBMRegressor
 import optuna
 from fastapi import FastAPI
 import uvicorn
@@ -24,15 +24,16 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # Константы
-MODEL_PATH = config.MODEL_PATH
+MODEL_PATH_ENTRY = config.MODEL_PATH.replace(".pkl", "_entry.pkl")
+MODEL_PATH_TP = config.MODEL_PATH.replace(".pkl", "_tp.pkl")
+MODEL_PATH_SL = config.MODEL_PATH.replace(".pkl", "_sl.pkl")
 ACCURACY_PATH = config.ACCURACY_PATH
 HORIZON_PERIODS = 12  # ~3 часа для 15мин
 LOOKBACK_PERIOD = 96  # ~1 день
 MIN_DATA_ROWS = config.MIN_DATA_ROWS
-TARGET_ACCURACY = 0.75
-MIN_ACCURACY_FOR_SIGNAL = config.MIN_ACCURACY_FOR_SIGNAL
+TARGET_RMSE = 0.005  # Цель по RMSE для регрессии
 MAX_TRAINING_TIME = 1000  # Уменьшено для тестирования
-PREDICTION_PROB_THRESHOLD = 0.6  # Снижено для сигналов
+PREDICTION_THRESHOLD = 0.002  # Порог для сигнала (аналог 0.2%)
 N_SPLITS_TS_CV = 5
 OPTUNA_STORAGE_URL = config.OPTUNA_STORAGE_URL
 OPTUNA_STUDY_NAME = config.OPTUNA_STUDY_NAME
@@ -120,14 +121,17 @@ def prepare_data():
     df_features["Close_Lag1"] = df_features["Close"].shift(1)
     df_features["RSI_Lag1"] = df_features["RSI"].shift(1)
 
-    # Целевой признак
+    # Целевые признаки
     df_features["FutureReturn"] = df_features["Close"].shift(-HORIZON_PERIODS) / df_features["Close"] - 1
-    df_features["Target"] = (df_features["FutureReturn"] >= 0.002).astype(int)  # Смягчен порог
+    df_features["FutureMax"] = df_features["Close"].rolling(window=HORIZON_PERIODS).max().shift(-HORIZON_PERIODS)
+    df_features["FutureMin"] = df_features["Close"].rolling(window=HORIZON_PERIODS).min().shift(-HORIZON_PERIODS)
 
     df_features = df_features.dropna()
 
-    # Логирование распределения целевого признака
-    logger.info(f"Target distribution:\n{df_features['Target'].value_counts(normalize=True)}")
+    # Логирование статистики
+    logger.info(f"FutureReturn stats: mean={df_features['FutureReturn'].mean():.4f}, std={df_features['FutureReturn'].std():.4f}")
+    logger.info(f"FutureMax stats: mean={df_features['FutureMax'].mean():.4f}, std={df_features['FutureMax'].std():.4f}")
+    logger.info(f"FutureMin stats: mean={df_features['FutureMin'].mean():.4f}, std={df_features['FutureMin'].std():.4f}")
 
     # Финальные признаки
     feature_columns = [
@@ -137,25 +141,29 @@ def prepare_data():
     ]
 
     X_raw = df_features[feature_columns]
-    y_raw = df_features["Target"]
+    y_return = df_features["FutureReturn"]
+    y_max = df_features["FutureMax"]
+    y_min = df_features["FutureMin"]
     X_raw = X_raw.replace([np.inf, -np.inf], np.nan).ffill().bfill()
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
     X_scaled_df = pd.DataFrame(X_scaled, columns=X_raw.columns, index=X_raw.index)
 
-    return X_scaled_df, y_raw, scaler, df_features
+    return X_scaled_df, y_return, y_max, y_min, scaler, df_features
 
 def train_model():
-    logger.info("🚀 Training model...")
-    X, y, scaler, df = prepare_data()
-    X_train_val, X_test, y_train_val, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    logger.info("🚀 Training models...")
+    X, y_return, y_max, y_min, scaler, df = prepare_data()
+    X_train_val, X_test, y_return_train_val, y_return_test = train_test_split(X, y_return, test_size=0.2, shuffle=False)
+    _, _, y_max_train_val, y_max_test = train_test_split(X, y_max, test_size=0.2, shuffle=False)
+    _, _, y_min_train_val, y_min_test = train_test_split(X, y_min, test_size=0.2, shuffle=False)
 
     tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
     
-    def objective(trial):
+    def objective(trial, y_train_val, y_test):
         params = {
-            "objective": "binary",
-            "metric": "binary_logloss",
+            "objective": "regression",
+            "metric": "rmse",
             "n_estimators": trial.suggest_int("n_estimators", 50, 200),
             "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.05, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 10, 40),
@@ -166,73 +174,110 @@ def train_model():
             "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
             "random_state": 42,
-            "verbosity": -1,
-            "class_weight": "balanced"  # Для дисбаланса
+            "verbosity": -1
         }
 
-        model = LGBMClassifier(**params)
+        model = LGBMRegressor(**params)
         scores = []
         for train_idx, val_idx in tscv.split(X_train_val):
             X_tr, X_val = X_train_val.iloc[train_idx], X_train_val.iloc[val_idx]
             y_tr, y_val = y_train_val.iloc[train_idx], y_train_val.iloc[val_idx]
-            if len(np.unique(y_tr)) > 1:
-                model.fit(X_tr, y_tr)
-                preds = model.predict(X_val)
-                score = f1_score(y_val, preds, average="weighted")
-                scores.append(score)
-        return np.mean(scores) if scores else 0.0
+            model.fit(X_tr, y_tr)
+            preds = model.predict(X_val)
+            score = mean_squared_error(y_val, preds, squared=False)
+            scores.append(score)
+        return np.mean(scores)
 
-    logger.info("🔍 Starting Optuna optimization...")
-    study = optuna.create_study(direction="maximize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_STORAGE_URL, load_if_exists=True)
-    study.optimize(objective, timeout=MAX_TRAINING_TIME)
+    # Обучение модели для FutureReturn
+    logger.info("🔍 Optimizing model for FutureReturn...")
+    study_return = optuna.create_study(direction="minimize", study_name=f"{OPTUNA_STUDY_NAME}_return", storage=OPTUNA_STORAGE_URL, load_if_exists=True)
+    study_return.optimize(lambda trial: objective(trial, y_return_train_val, y_return_test), timeout=MAX_TRAINING_TIME//3)
+    best_params_return = study_return.best_params
+    best_params_return.update({"objective": "regression", "random_state": 42, "n_jobs": -1})
+    model_return = LGBMRegressor(**best_params_return)
+    model_return.fit(X_train_val, y_return_train_val)
 
-    best_params = study.best_params
-    best_params.update({"objective": "binary", "random_state": 42, "n_jobs": -1, "class_weight": "balanced"})
-    model = LGBMClassifier(**best_params)
-    model.fit(X_train_val, y_train_val)
+    # Обучение модели для FutureMax
+    logger.info("🔍 Optimizing model for FutureMax...")
+    study_max = optuna.create_study(direction="minimize", study_name=f"{OPTUNA_STUDY_NAME}_max", storage=OPTUNA_STORAGE_URL, load_if_exists=True)
+    study_max.optimize(lambda trial: objective(trial, y_max_train_val, y_max_test), timeout=MAX_TRAINING_TIME//3)
+    best_params_max = study_max.best_params
+    best_params_max.update({"objective": "regression", "random_state": 42, "n_jobs": -1})
+    model_max = LGBMRegressor(**best_params_max)
+    model_max.fit(X_train_val, y_max_train_val)
 
-    y_pred = model.predict(X_test)
-    y_pred_proba = model.predict_proba(X_test)[:, 1]
-    f1 = f1_score(y_test, y_pred, average="weighted")
-    logger.info(f"✅ Model trained. F1 Score: {f1:.4f}")
-    logger.info(f"Prediction probabilities (mean, std): {np.mean(y_pred_proba):.4f}, {np.std(y_pred_proba):.4f}")
+    # Обучение модели для FutureMin
+    logger.info("🔍 Optimizing model for FutureMin...")
+    study_min = optuna.create_study(direction="minimize", study_name=f"{OPTUNA_STUDY_NAME}_min", storage=OPTUNA_STORAGE_URL, load_if_exists=True)
+    study_min.optimize(lambda trial: objective(trial, y_min_train_val, y_min_test), timeout=MAX_TRAINING_TIME//3)
+    best_params_min = study_min.best_params
+    best_params_min.update({"objective": "regression", "random_state": 42, "n_jobs": -1})
+    model_min = LGBMRegressor(**best_params_min)
+    model_min.fit(X_train_val, y_min_train_val)
 
-    if f1 < 0.6 or f1 > 0.95:
-        logger.warning("⚠️ Suspicious F1 score. Possible overfitting or data issue.")
+    # Оценка моделей
+    y_return_pred = model_return.predict(X_test)
+    y_max_pred = model_max.predict(X_test)
+    y_min_pred = model_min.predict(X_test)
+    rmse_return = mean_squared_error(y_return_test, y_return_pred, squared=False)
+    rmse_max = mean_squared_error(y_max_test, y_max_pred, squared=False)
+    rmse_min = mean_squared_error(y_min_test, y_min_pred, squared=False)
+    logger.info(f"✅ Models trained. RMSE: Return={rmse_return:.4f}, Max={rmse_max:.4f}, Min={rmse_min:.4f}")
 
-    importance = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
-    logger.info(f"Feature importance:\n{importance}")
+    if rmse_return > TARGET_RMSE or rmse_max > TARGET_RMSE or rmse_min > TARGET_RMSE:
+        logger.warning("⚠️ High RMSE. Possible model underfitting.")
 
-    joblib.dump(model, MODEL_PATH)
+    # Логирование важности признаков
+    importance_return = pd.Series(model_return.feature_importances_, index=X.columns).sort_values(ascending=False)
+    logger.info(f"Feature importance (Return):\n{importance_return}")
+    importance_max = pd.Series(model_max.feature_importances_, index=X.columns).sort_values(ascending=False)
+    logger.info(f"Feature importance (Max):\n{importance_max}")
+    importance_min = pd.Series(model_min.feature_importances_, index=X.columns).sort_values(ascending=False)
+    logger.info(f"Feature importance (Min):\n{importance_min}")
+
+    # Сохранение моделей
+    joblib.dump(model_return, MODEL_PATH_ENTRY)
+    joblib.dump(model_max, MODEL_PATH_TP)
+    joblib.dump(model_min, MODEL_PATH_SL)
     joblib.dump({"scaler": scaler, "feature_columns": list(X.columns)}, "scaler_and_features.pkl")
 
     with open(ACCURACY_PATH, "w") as f:
-        json.dump({"f1_score": f1, "last_trained": datetime.now().isoformat()}, f)
+        json.dump({
+            "rmse_return": rmse_return,
+            "rmse_max": rmse_max,
+            "rmse_min": rmse_min,
+            "last_trained": datetime.now().isoformat()
+        }, f)
 
-def generate_signal(model, scaler, latest_features, df_point):
-    probas = model.predict_proba(latest_features)[0]
-    buy_proba = probas[1]
-    if buy_proba >= PREDICTION_PROB_THRESHOLD:
+def generate_signal(model_return, model_max, model_min, scaler, latest_features, df_point):
+    pred_return = model_return.predict(latest_features)[0]
+    pred_max = model_max.predict(latest_features)[0]
+    pred_min = model_min.predict(latest_features)[0]
+    if pred_return >= PREDICTION_THRESHOLD:
         entry = df_point["Close"].values[0]
-        message = f"📊 Signal: BUY\n🕒 Time: {df_point.index[0]}\n💰 Price: {entry:.5f}\n⬆️ Buy Proba: {buy_proba:.4f}"
+        tp = pred_max
+        sl = pred_min
+        message = f"📊 Signal: BUY\n🕒 Time: {df_point.index[0]}\n💰 Entry: {entry:.5f}\n⬆️ Predicted Return: {pred_return:.4f}\n📈 TP: {tp:.5f}\n📉 SL: {sl:.5f}"
         send_telegram_message(message)
         logger.info(f"📤 Sent signal: {message}")
     else:
-        logger.info(f"❌ No confident signal. Buy proba: {buy_proba:.4f}")
+        logger.info(f"❌ No confident signal. Predicted return: {pred_return:.4f}")
 
 @app.get("/")
 async def root():
     try:
-        if not os.path.exists(MODEL_PATH) or not os.path.exists(ACCURACY_PATH):
-            logger.info("🚀 Model not found — training...")
+        if not all(os.path.exists(p) for p in [MODEL_PATH_ENTRY, MODEL_PATH_TP, MODEL_PATH_SL, ACCURACY_PATH]):
+            logger.info("🚀 Models not found — training...")
             train_model()
         with open(ACCURACY_PATH, "r") as f:
             data = json.load(f)
         last_trained = datetime.fromisoformat(data["last_trained"])
-        if (datetime.now() - last_trained).days >= 1 or data["f1_score"] < TARGET_ACCURACY:
-            logger.info("🔁 Retraining model...")
+        if (datetime.now() - last_trained).days >= 1 or any(data[k] > TARGET_RMSE for k in ["rmse_return", "rmse_max", "rmse_min"]):
+            logger.info("🔁 Retraining models...")
             train_model()
-        model = joblib.load(MODEL_PATH)
+        model_return = joblib.load(MODEL_PATH_ENTRY)
+        model_max = joblib.load(MODEL_PATH_TP)
+        model_min = joblib.load(MODEL_PATH_SL)
         scaler_data = joblib.load("scaler_and_features.pkl")
         scaler = scaler_data["scaler"]
         features = scaler_data["feature_columns"]
@@ -254,7 +299,7 @@ async def root():
             latest_features = scaler.transform(latest_features)
             latest_features = pd.DataFrame(latest_features, columns=features)
             latest_original_point = df.iloc[[-1]]
-            generate_signal(model, scaler, latest_features, latest_original_point)
+            generate_signal(model_return, model_max, model_min, scaler, latest_features, latest_original_point)
     except Exception as e:
         logger.error(f"❌ root() error: {e}")
     return {"status": "Bot is running"}
