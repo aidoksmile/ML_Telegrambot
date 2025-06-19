@@ -123,8 +123,8 @@ def prepare_data():
 
     # Целевые признаки
     df_features["FutureReturn"] = df_features["Close"].shift(-HORIZON_PERIODS) / df_features["Close"] - 1
-    df_features["FutureMax"] = df_features["Close"].rolling(window=HORIZON_PERIODS).max().shift(-HORIZON_PERIODS)
-    df_features["FutureMin"] = df_features["Close"].rolling(window=HORIZON_PERIODS).min().shift(-HORIZON_PERIODS)
+    df_features["FutureMax"] = df_features["High"].rolling(window=HORIZON_PERIODS).max().shift(-HORIZON_PERIODS)
+    df_features["FutureMin"] = df_features["Low"].rolling(window=HORIZON_PERIODS).min().shift(-HORIZON_PERIODS)
 
     df_features = df_features.dropna()
 
@@ -184,7 +184,7 @@ def train_model():
             y_tr, y_val = y_train_val.iloc[train_idx], y_train_val.iloc[val_idx]
             model.fit(X_tr, y_tr)
             preds = model.predict(X_val)
-            score = mean_squared_error(y_val, preds, squared=False)
+            score = np.sqrt(mean_squared_error(y_val, preds))  # Исправлено
             scores.append(score)
         return np.mean(scores)
 
@@ -219,9 +219,9 @@ def train_model():
     y_return_pred = model_return.predict(X_test)
     y_max_pred = model_max.predict(X_test)
     y_min_pred = model_min.predict(X_test)
-    rmse_return = mean_squared_error(y_return_test, y_return_pred, squared=False)
-    rmse_max = mean_squared_error(y_max_test, y_max_pred, squared=False)
-    rmse_min = mean_squared_error(y_min_test, y_min_pred, squared=False)
+    rmse_return = np.sqrt(mean_squared_error(y_return_test, y_return_pred))  # Исправлено
+    rmse_max = np.sqrt(mean_squared_error(y_max_test, y_max_pred))  # Исправлено
+    rmse_min = np.sqrt(mean_squared_error(y_min_test, y_min_pred))  # Исправлено
     logger.info(f"✅ Models trained. RMSE: Return={rmse_return:.4f}, Max={rmse_max:.4f}, Min={rmse_min:.4f}")
 
     if rmse_return > TARGET_RMSE or rmse_max > TARGET_RMSE or rmse_min > TARGET_RMSE:
