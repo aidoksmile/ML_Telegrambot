@@ -214,6 +214,9 @@ def train_model():
             "class_weight": class_weight,
         }
 
+        # 🛡️ Безопасный class_weight по умолчанию
+        class_weight = {0: 1.0, 1: 1.0}
+    
         unique_labels = y_train_val_int.unique()
         if len(unique_labels) > 1:
             neg_count = (y_train_val_int == 0).sum()
