@@ -193,6 +193,7 @@ def train_model():
     # Приводим к int для корректной работы class_weight
     y_train_val_int = y_train_val.astype(int)
     y_test_int = y_test.astype(int)
+    tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
     
     def objective(trial):
         params = {
