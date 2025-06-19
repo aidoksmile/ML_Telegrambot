@@ -197,6 +197,8 @@ def train_model():
     class_weight = {0: 1.0, 1: neg_count / pos_count if pos_count > 0 else 1.0}
     
 def objective(trial):
+    nonlocal class_weight
+    
     params = {
         "objective": "binary",
         "metric": "binary_logloss",
