@@ -195,7 +195,18 @@ def train_model():
     y_test_int = y_test.astype(int)
     
     def objective(trial):
+        unique_labels = y_train_val_int.unique()
+    
+        # Задаём class_weight по умолчанию
+        class_weight = {0: 1.0, 1: 1.0}
 
+        # Если оба класса присутствуют — пересчитаем веса
+        if 0 in unique_labels and 1 in unique_labels:
+            neg_count = (y_train_val_int == 0).sum()
+            pos_count = (y_train_val_int == 1).sum()
+            if pos_count > 0:
+                class_weight = {0: 1.0, 1: neg_count / pos_count}
+                
         params = {
             "objective": "binary",
             "metric": "binary_logloss",
@@ -214,18 +225,6 @@ def train_model():
             "class_weight": class_weight,
         }
 
-        # 🛡️ Безопасный class_weight по умолчанию
-        class_weight = {0: 1.0, 1: 1.0}
-    
-        unique_labels = y_train_val_int.unique()
-        if len(unique_labels) > 1:
-            neg_count = (y_train_val_int == 0).sum()
-            pos_count = (y_train_val_int == 1).sum()
-            class_weight = {
-                0: 1.0,
-                1: neg_count / pos_count if pos_count > 0 else 1.0
-            }
-            params["class_weight"] = class_weight
 
         model = LGBMClassifier(**params)
         tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
