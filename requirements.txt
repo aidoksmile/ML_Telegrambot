@@ -1,19 +1,19 @@
-# Базовые библиотеки
+# 📦 Data & API
 pandas==2.3.0
 numpy==1.26.4
 requests==2.32.4
 python-dotenv==1.1.0
 
-# ML / моделирование
+# 🧠 ML
 scikit-learn==1.7.0
 lightgbm==4.5.0
 joblib==1.5.1
 optuna==4.3.0
 optuna-integration[lightgbm]==4.3.0
 
-# API / веб
-fastapi==0.115.12
-uvicorn==0.34.3
+# 🌐 API
+fastapi==0.115.1
+uvicorn==0.34.0
 
-# Telegram уведомления
+# 📬 Telegram
 python-telegram-bot==21.2
