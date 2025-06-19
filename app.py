@@ -219,13 +219,15 @@ def train_model():
             "class_weight": class_weight,
         }
 
-        if USE_CLASS_WEIGHT:
+        unique_labels = y_train_val_int.unique()
+        if len(unique_labels) > 1:
             neg_count = (y_train_val_int == 0).sum()
             pos_count = (y_train_val_int == 1).sum()
-            params["class_weight"] = {
+            class_weight = {
                 0: 1.0,
                 1: neg_count / pos_count if pos_count > 0 else 1.0
             }
+            params["class_weight"] = class_weight
 
         model = LGBMClassifier(**params)
         tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
