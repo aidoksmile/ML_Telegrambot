@@ -197,13 +197,9 @@ def train_model():
     # Показываем метки классов (важно для отладки!)
     logger.info(f"Unique labels in y_train_val: {y_train_val_int.unique()}")
 
+    USE_CLASS_WEIGHT = len(unique_labels) > 1
+    
     def objective(trial):
-        neg_count = (y_train_val_int == 0).sum()
-        pos_count = (y_train_val_int == 1).sum()
-        class_weight = {
-            0: 1.0,
-            1: neg_count / pos_count if pos_count > 0 else 1.0
-        }
 
         params = {
             "objective": "binary",
@@ -222,6 +218,14 @@ def train_model():
             "verbose": -1,
             "class_weight": class_weight,
         }
+
+        if USE_CLASS_WEIGHT:
+            neg_count = (y_train_val_int == 0).sum()
+            pos_count = (y_train_val_int == 1).sum()
+            params["class_weight"] = {
+                0: 1.0,
+                1: neg_count / pos_count if pos_count > 0 else 1.0
+            }
 
         model = LGBMClassifier(**params)
         tscv = TimeSeriesSplit(n_splits=N_SPLITS_TS_CV)
